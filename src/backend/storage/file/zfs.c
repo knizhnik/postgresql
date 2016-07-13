@@ -326,7 +326,7 @@ static bool zfs_gc_file(char* map_path)
 		if (md2 < 0) { 
 			goto Cleanup;
 		}
-		n_pages = pg_atomic_read_u32(&map->virtSize) / BLCKSZ
+		n_pages = pg_atomic_read_u32(&map->virtSize) / BLCKSZ;
 		for (i = 0; i < n_pages; i++) { 
 			newMap->entries[i] = map->entries[i];
 			entries[i] = &newMap->entries[i];

@@ -61,7 +61,7 @@ static relopt_bool boolRelOpts[] =
 			RELOPT_KIND_TABLESPACE,
 			AccessExclusiveLock
 		},
-		true
+		false
 	},
 	{
 		{

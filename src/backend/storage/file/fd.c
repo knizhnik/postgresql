@@ -1662,7 +1662,6 @@ FileLock(File file)
 	if (vfdP->generation != vfdP->map->generation) 
 	{
 		close(vfdP->fd);
-		vfdP->fd = VFD_CLOSED;
 		vfdP->fd = BasicOpenFile(vfdP->fileName, vfdP->fileFlags, vfdP->fileMode);
 		if (vfdP->fd < 0)
 		{
@@ -1980,8 +1979,8 @@ FileSeek(File file, off_t offset, int whence)
 				VfdCache[file].seekPos += offset;
 				break;
 			case SEEK_END:
-			  returnCode = FileAccess(file);
-			  if (returnCode < 0)
+			    returnCode = FileAccess(file);
+			    if (returnCode < 0)
 				  return returnCode;
 			    if (VfdCache[file].fileFlags & PG_COMPRESSION) {
 					FileMap* map = VfdCache[file].map;
@@ -3015,10 +3014,6 @@ looks_like_temp_rel_name(const char *name)
 	{
 		int			segchar;
 
-		if (strcmp(&name[pos+1], "map") == 0) 
-		{
-			return true;
-		}
 		for (segchar = 1; isdigit((unsigned char) name[pos + segchar]); ++segchar)
 			;
 		if (segchar <= 1)
