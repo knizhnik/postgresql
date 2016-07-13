@@ -492,13 +492,17 @@ static bool zfs_gc_directory(int worker_id, char const* path)
 				continue;
 			}
 			len = snprintf(file_path, sizeof(file_path), "%s/%s", path, entry->d_name);
-			if (len > 4  && strcmp(file_path + len - 4, ".map") == 0) { 
-				if (entry->d_ino % zfs_gc_workers == worker_id && !zfs_gc_file(file_path)) { 
+			if (len > 4 && 
+				strcmp(file_path + len - 4, ".map") == 0) 
+			{ 
+				if (entry->d_ino % zfs_gc_workers == worker_id && !zfs_gc_file(file_path))
+				{ 
 					success = false;
 					break;
 				}
 			} else { 
-				if (!zfs_gc_directory(worker_id, file_path)) { 
+				if (!zfs_gc_directory(worker_id, file_path)) 
+				{ 
 					success = false;
 					break;
 				}

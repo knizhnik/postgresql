@@ -1609,7 +1609,7 @@ FilePrefetch(File file, off_t offset, int amount)
 			   file, VfdCache[file].fileName,
 			   (int64) offset, amount));
 
-	if (VfdCache[file].fileFlags & ~PG_COMPRESSION)
+	if (VfdCache[file].fileFlags & PG_COMPRESSION)
 	{ 		
 		return 0;
 	}
@@ -1696,6 +1696,7 @@ FileRead(File file, char *buffer, int amount)
 		Assert(amount == BLCKSZ);
 		Assert((VfdCache[file].seekPos & (BLCKSZ-1)) == 0);
 
+		amount = entry->size;
 		if (amount == 0) { 
 			return 0;
 		}
@@ -1738,7 +1739,6 @@ FileRead(File file, char *buffer, int amount)
 	}
   retry:
 	returnCode = read(VfdCache[file].fd, buffer, amount);
-
 	if (returnCode >= 0)
 	{
 		VfdCache[file].seekPos += returnCode;
@@ -1874,6 +1874,7 @@ retry:
 				zfs_extend(VfdCache[file].map, VfdCache[file].seekPos);
 				returnCode = BLCKSZ;
 			} else { 
+				elog(LOG, "Write failed with code %d: %m", returnCode);
 				returnCode = 0;
 			}
 		} 

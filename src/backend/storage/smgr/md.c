@@ -204,7 +204,9 @@ static BlockNumber _mdnblocks(SMgrRelation reln, ForkNumber forknum,
 /* TODO: make it possibleto switch on compression only for particular tables or tablespaces */
 static bool md_use_compression(SMgrRelation reln, ForkNumber forknum)
 {
-	return reln->smgr_rnode.node.spcNode != DEFAULTTABLESPACE_OID 
+	return  
+		reln->smgr_rnode.node.spcNode != DEFAULTTABLESPACE_OID 
+		&& reln->smgr_rnode.node.spcNode != GLOBALTABLESPACE_OID
 		&& is_tablespace_compressed(reln->smgr_rnode.node.spcNode) 
 		&& forknum == MAIN_FORKNUM;
 }

@@ -5320,7 +5320,7 @@ DATA(insert OID = 3444 ( pg_control_init PGNSP PGUID 12 1 0 0 0 f f f f t f v s 
 DESCR("pg_controldata init state information as a function");
 
 DATA(insert OID = 6015 (  zfs_start_gc		   PGNSP PGUID 12 1 0 0 0 f f f f t f i s 1 0 23 "23" _null_ _null_ _null_ _null_ _null_ zfs_start_gc _null_ _null_ _null_ ));
-DESCR("zfs_start_gc start XFS garbage collection");
+DESCR("zfs_start_gc start ZFS garbage collection");
 
 
 /*
