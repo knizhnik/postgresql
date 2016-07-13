@@ -251,6 +251,8 @@ static bool zfs_gc_file(char* map_path)
 	uint32 usedSize;
 	size_t suf = strlen(map_path)-4;
 	int fd = -1, fd2 = -1, md2 = -1;
+	bool succeed = true;
+
 	if (md < 0) { 
 		elog(LOG, "Failed to open map file %s: %m", map_path);
 		return false;
@@ -264,14 +266,18 @@ static bool zfs_gc_file(char* map_path)
 	usedSize = pg_atomic_read_u32(&map->usedSize);
 	realSize = pg_atomic_read_u32(&map->physSize);
 
-	if ((realSize - usedSize)*100 > realSize*zfs_gc_threshold) 
+	if ((realSize - usedSize)*100 > realSize*zfs_gc_threshold) /* do we need to perform defragmentation? */
 	{ 
 		long delay = ZFS_LOCK_MIN_TIMEOUT;		
 		char* file_path = (char*)palloc(suf+1);
 		char* map_bck_path = (char*)palloc(suf+10);
 		char* file_bck_path = (char*)palloc(suf+5);
-		FileMap newMap;
+		FileMap* newMap = (FileMap*)palloc0(sizeof(FileMap));
 		uint32 usedSize = 0;
+		FileMapEntry** entries = (FileMapEntry**)palloc(RELSEG_SIZE*sizeof(FileMapEntry*));
+		bool remove_backups = true;
+		int n_pages;
+		int i;
 
 		memcpy(file_path, map_path, suf);
 		file_path[suf] = '\0';
@@ -292,13 +298,14 @@ static bool zfs_gc_file(char* map_path)
 					md2 = open(map_bck_path, O_RDWR|PG_BINARY, 0);
 					if (md2 >= 0) { 
 						/* Recover map */
-						if (!zfs_read_file(md2, &newMap, sizeof(newMap))) { 
+						if (!zfs_read_file(md2, newMap, sizeof(FileMap))) { 
 							elog(LOG, "Failed to read file %s: %m", map_bck_path);
 							goto Cleanup;
 						}
 						close(md2);
 						md2 = -1;
-						usedSize = pg_atomic_read_u32(&newMap.usedSize);
+						usedSize = pg_atomic_read_u32(&newMap->usedSize);
+						remove_backups = false;
 						goto ReplaceMap;
 					}
 				} else { 
@@ -314,151 +321,157 @@ static bool zfs_gc_file(char* map_path)
 			if (delay < ZFS_LOCK_MAX_TIMEOUT) { 
 				delay *= 2;
 			}
-		}				 
-		if ((realSize - usedSize)*100 > realSize*zfs_gc_threshold) /* recheck condition in critical section */
-		{
-			FileMapEntry* entries[RELSEG_SIZE];
-			int i;
-			
-			md2 = open(map_bck_path, O_CREAT|O_RDWR|PG_BINARY|O_TRUNC, 0600);
-			if (md2 < 0) { 
-				goto Cleanup;
-			}
-			for (i = 0; i < RELSEG_SIZE; i++) { 
-				newMap.entries[i] = map->entries[i];
-				entries[i] = &newMap.entries[i];
-			}
-			qsort(entries, RELSEG_SIZE, sizeof(FileMapEntry*), zfs_cmp_page_offs);
-
-			fd = open(file_path, O_RDWR|PG_BINARY, 0);
-			if (fd < 0) { 
-				goto Cleanup;
-			}
-
-			fd2 = open(file_bck_path, O_CREAT|O_RDWR|PG_BINARY|O_TRUNC, 0600);
-			if (fd2 < 0) { 
-				goto Cleanup;
-			}
-			
-			for (i = 0; i < RELSEG_SIZE; i++) { 
-				if (entries[i]->size != 0) { 
-					char block[BLCKSZ];
-					int size = entries[i]->size;
-					off_t rc PG_USED_FOR_ASSERTS_ONLY;
-					Assert(size <= BLCKSZ);	
-					rc = lseek(fd, entries[i]->offs, SEEK_SET);
-					Assert(rc == entries[i]->offs);
-					
-					if (!zfs_read_file(fd, block, size)) { 
-						elog(LOG, "Failed to read file %s: %m", file_path);
-						goto Cleanup;
-					}
-
-					if (!zfs_write_file(fd2, block, size)) { 
-						elog(LOG, "Failed to write file %s: %m", file_bck_path);
-						goto Cleanup;
-					}
-					entries[i]->offs = usedSize;
-					usedSize += entries[i]->size;
-				}
-			}
-			pg_atomic_write_u32(&map->usedSize, usedSize);
-
-			if (!zfs_write_file(md2, &newMap, sizeof(newMap))) { 
-				elog(LOG, "Failed to write file %s: %m", map_bck_path);
-				goto Cleanup;
-			}
-			if (close(fd) < 0) { 
-				elog(LOG, "Failed to close file %s: %m", file_path);
-				goto Cleanup;
-			}
-			fd = -1;
-			if (pg_fsync(fd2) < 0) { 
-				elog(LOG, "Failed to sync file %s: %m", file_bck_path);
-				goto Cleanup;
-			}
-			if (close(fd2) < 0) { 
-				elog(LOG, "Failed to close file %s: %m", file_bck_path);
-				goto Cleanup;
-			}
-			fd2 = -1;
-			if (pg_fsync(md2) < 0) { 
-				elog(LOG, "Failed to sync file %s: %m", map_bck_path);
-				goto Cleanup;
-			}
-			if (close(md2) < 0) { 
-				elog(LOG, "Failed to close file %s: %m", map_bck_path);
-				goto Cleanup;
-			}
-			md2 = -1;
-			if (rename(file_bck_path, file_path) < 0) { 
-				elog(LOG, "Failed to rename file %s: %m", file_path);
-				goto Cleanup;
-			}
-		  ReplaceMap:
-			/* At this moment packed file version is stored */
-			memcpy(map->entries, newMap.entries, pg_atomic_read_u32(&map->virtSize) / BLCKSZ * sizeof(FileMapEntry));
-			pg_atomic_write_u32(&map->usedSize, usedSize);
-			pg_atomic_write_u32(&map->physSize, usedSize);
-			map->generation += 1;
-
-			if (zfs_msync(map) < 0) {
-				elog(LOG, "Failed to sync map %s: %m", map_path);
-				zfs_munmap(map);
-				close(md);
-				return false;
-			}
-			if (pg_fsync(md) < 0) { 
-				elog(LOG, "Failed to sync file %s: %m", map_path);
-				zfs_munmap(map);				
-				close(md);
-				return false;
-			}
-			pg_atomic_fetch_sub_u32(&map->lock, ZFS_GC_LOCK);
-
-			if (unlink(map_bck_path)) {
-				elog(LOG, "Failed to unlink file %s: %m", map_bck_path);
-				zfs_munmap(map);				
-				close(md);
-				return false;
-			}
-		} else { 
-			/* Finally release lock */
-			pg_atomic_fetch_sub_u32(&map->lock, ZFS_GC_LOCK);
+		}				 			
+		md2 = open(map_bck_path, O_CREAT|O_RDWR|PG_BINARY|O_TRUNC, 0600);
+		if (md2 < 0) { 
+			goto Cleanup;
 		}
-
-		pfree(file_path);
-		pfree(file_bck_path);
-		pfree(map_bck_path);
+		n_pages = pg_atomic_read_u32(&map->virtSize) / BLCKSZ
+		for (i = 0; i < n_pages; i++) { 
+			newMap->entries[i] = map->entries[i];
+			entries[i] = &newMap->entries[i];
+		}
+		/* sort entries by offset to improve read locality */
+		qsort(entries, n_pages, sizeof(FileMapEntry*), zfs_cmp_page_offs);
 		
-		if (zfs_munmap(map) < 0) { 
-			elog(LOG, "Failed to unmap file %s: %m", map_path);
-			close(md);
-			return false;
+		fd = open(file_path, O_RDWR|PG_BINARY, 0);
+		if (fd < 0) { 
+			goto Cleanup;
 		}
-		if (close(md) < 0) { 
-			elog(LOG, "Failed to close file %s: %m", map_path);
-			return false;
+		
+		fd2 = open(file_bck_path, O_CREAT|O_RDWR|PG_BINARY|O_TRUNC, 0600);
+		if (fd2 < 0) { 
+			goto Cleanup;
 		}
-		return true;
+		
+		for (i = 0; i < n_pages; i++) { 
+			if (entries[i]->size != 0) { 
+				char block[BLCKSZ];
+				int size = entries[i]->size;
+				off_t rc PG_USED_FOR_ASSERTS_ONLY;
+				Assert(size <= BLCKSZ);	
+				rc = lseek(fd, entries[i]->offs, SEEK_SET);
+				Assert(rc == entries[i]->offs);
+				
+				if (!zfs_read_file(fd, block, size)) { 
+					elog(LOG, "Failed to read file %s: %m", file_path);
+					goto Cleanup;
+				}
+				
+				if (!zfs_write_file(fd2, block, size)) { 
+					elog(LOG, "Failed to write file %s: %m", file_bck_path);
+					goto Cleanup;
+				}
+				entries[i]->offs = usedSize;
+				usedSize += entries[i]->size;
+			}
+		}
+		pg_atomic_write_u32(&map->usedSize, usedSize);
 
-	  Cleanup:
-		pg_atomic_fetch_sub_u32(&map->lock, ZFS_GC_LOCK);
-		zfs_munmap(map);
-		close(md);
-		if (fd >= 0) close(fd);
-		if (fd2 >= 0) close(fd2);
-		if (md2 >= 0) close(md2);
-		unlink(file_bck_path);
-		unlink(map_bck_path);
+		if (close(fd) < 0) { 
+			elog(LOG, "Failed to close file %s: %m", file_path);
+			goto Cleanup;
+		}
+		fd = -1;
+
+		/* Persist copy of data file */
+		if (pg_fsync(fd2) < 0) { 
+			elog(LOG, "Failed to sync file %s: %m", file_bck_path);
+			goto Cleanup;
+		}
+		if (close(fd2) < 0) { 
+			elog(LOG, "Failed to close file %s: %m", file_bck_path);
+			goto Cleanup;
+		}
+		fd2 = -1;
+
+		/* Persist copy of map file */
+		if (!zfs_write_file(md2, &newMap, sizeof(newMap))) { 
+			elog(LOG, "Failed to write file %s: %m", map_bck_path);
+			goto Cleanup;
+		}
+		if (pg_fsync(md2) < 0) { 
+			elog(LOG, "Failed to sync file %s: %m", map_bck_path);
+			goto Cleanup;
+		}
+		if (close(md2) < 0) { 
+			elog(LOG, "Failed to close file %s: %m", map_bck_path);
+			goto Cleanup;
+		}
+		md2 = -1;
+
+		/* Persist map with ZFS_GC_LOCK set: in case of crash we will know that map may be changed by GC */
+		if (zfs_msync(map) < 0) {
+			elog(LOG, "Failed to sync map %s: %m", map_path);
+			goto Cleanup;
+		}
+		if (pg_fsync(md) < 0) { 
+			elog(LOG, "Failed to sync file %s: %m", map_path);
+			goto Cleanup;
+		}
+		
+		/* 
+		 * Now all information necessary for recovery is stored.
+		 * We are ready to replace existed file with defragmented one.
+		 * Use rename and rely on file system to provide atomicity of this operation.
+		 */
+		remove_backups = false;
+		if (rename(file_bck_path, file_path) < 0) { 
+			elog(LOG, "Failed to rename file %s: %m", file_path);
+			goto Cleanup;
+		}
+	  ReplaceMap:
+		/* At this moment defragmented file version is stored. We can perfrom in-place update of map.
+		 * If crash happens at this point, map can be recovered from backup file */
+		memcpy(map->entries, newMap->entries, n_pages * sizeof(FileMapEntry));
+		pg_atomic_write_u32(&map->usedSize, usedSize);
+		pg_atomic_write_u32(&map->physSize, usedSize);
+		map->generation += 1; /* force all backends to reopen the file */
+		
+		/* Before removing backup files and releasing locks we need to flush updated map file */
+		if (zfs_msync(map) < 0) {
+			elog(LOG, "Failed to sync map %s: %m", map_path);
+			goto Cleanup;
+		}
+		if (pg_fsync(md) < 0) { 
+			elog(LOG, "Failed to sync file %s: %m", map_path);
+		  Cleanup:
+			if (fd >= 0) close(fd);
+			if (fd2 >= 0) close(fd2);
+			if (md2 >= 0) close(md2);
+			if (remove_backups) { 
+				unlink(file_bck_path);
+				unlink(map_bck_path);		
+				remove_backups = false;
+			}	
+			succeed = false;
+		} else { 
+			remove_backups = true; /* now backups are not need any more */
+		}
+		pg_atomic_fetch_sub_u32(&map->lock, ZFS_GC_LOCK); /* release lock */
+
+		/* remove map backup file */
+		if (remove_backups && unlink(map_bck_path)) {
+			elog(LOG, "Failed to unlink file %s: %m", map_bck_path);
+			succeed = false;
+		}
+		
 		pfree(file_path);
 		pfree(file_bck_path);
 		pfree(map_bck_path);
-		return false;
+		pfree(entries);
+		pfree(newMap);
 	}
-	zfs_munmap(map);
-	close(md);
-	return true;
+	
+	if (zfs_munmap(map) < 0) { 
+		elog(LOG, "Failed to unmap file %s: %m", map_path);
+		succeed = false;
+	}
+	if (close(md) < 0) { 
+		elog(LOG, "Failed to close file %s: %m", map_path);
+		succeed = false;
+	}
+	return succeed;
 }
 
 static bool zfs_gc_directory(int worker_id, char const* path)

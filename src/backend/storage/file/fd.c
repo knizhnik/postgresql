@@ -2060,11 +2060,14 @@ FileTruncate(File file, off_t offset)
 	if (VfdCache[file].fileFlags & PG_COMPRESSION) {
 		int i;
 		FileMap* map = VfdCache[file].map;
+		uint32 released = 0;
 		Assert((offset & (BLCKSZ-1)) == 0);
 		for (i = offset / BLCKSZ; i < RELSEG_SIZE; i++) {  
+			released += map->entries[i].size;
 			map->entries[i].size = 0;
 		}
 		pg_atomic_write_u32(&map->virtSize, offset);
+		pg_atomic_fetch_sub_u32(&map->usedSize, released);
 		returnCode = 0;
 	} else  {
 		returnCode = ftruncate(VfdCache[file].fd, offset);
