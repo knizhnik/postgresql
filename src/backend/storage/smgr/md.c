@@ -28,6 +28,7 @@
 #include "miscadmin.h"
 #include "access/xlog.h"
 #include "catalog/catalog.h"
+#include "catalog/pg_tablespace.h"
 #include "portability/instr_time.h"
 #include "postmaster/bgwriter.h"
 #include "storage/fd.h"
@@ -36,6 +37,7 @@
 #include "storage/smgr.h"
 #include "utils/hsearch.h"
 #include "utils/memutils.h"
+#include "utils/spccache.h"
 #include "pg_trace.h"
 
 
@@ -199,6 +201,14 @@ static MdfdVec *_mdfd_getseg(SMgrRelation reln, ForkNumber forkno,
 static BlockNumber _mdnblocks(SMgrRelation reln, ForkNumber forknum,
 		   MdfdVec *seg);
 
+/* TODO: make it possibleto switch on compression only for particular tables or tablespaces */
+static bool md_use_compression(SMgrRelation reln, ForkNumber forknum)
+{
+	return reln->smgr_rnode.node.spcNode != DEFAULTTABLESPACE_OID 
+		&& is_tablespace_compressed(reln->smgr_rnode.node.spcNode) 
+		&& forknum == MAIN_FORKNUM;
+}
+
 
 /*
  *	mdinit() -- Initialize private state for magnetic disk storage manager.
@@ -300,15 +310,21 @@ mdcreate(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
 {
 	char	   *path;
 	File		fd;
+	int         flags = O_RDWR | O_CREAT | O_EXCL | PG_BINARY;
 
 	if (isRedo && reln->md_fd[forkNum] != NULL)
 		return;					/* created and opened already... */
+
+	if (md_use_compression(reln, forkNum))
+	{
+		flags |= PG_COMPRESSION;
+	}
 
 	Assert(reln->md_fd[forkNum] == NULL);
 
 	path = relpath(reln->smgr_rnode, forkNum);
 
-	fd = PathNameOpenFile(path, O_RDWR | O_CREAT | O_EXCL | PG_BINARY, 0600);
+	fd = PathNameOpenFile(path, flags, 0600);
 
 	if (fd < 0)
 	{
@@ -321,7 +337,7 @@ mdcreate(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
 		 * already, even if isRedo is not set.  (See also mdopen)
 		 */
 		if (isRedo || IsBootstrapProcessingMode())
-			fd = PathNameOpenFile(path, O_RDWR | PG_BINARY, 0600);
+			fd = PathNameOpenFile(path, flags & ~(O_CREAT | O_EXCL), 0600);
 		if (fd < 0)
 		{
 			/* be sure to report the error reported by create, not open */
@@ -483,7 +499,14 @@ mdunlinkfork(RelFileNodeBackend rnode, ForkNumber forkNum, bool isRedo)
 		}
 		pfree(segpath);
 	}
-
+	/* 
+	 * Delete map file
+	 */
+	if (forkNum == MAIN_FORKNUM) { 
+		char* mapFileName = psprintf("%s.map",  path);
+		unlink(mapFileName);
+		pfree(mapFileName);
+	}
 	pfree(path);
 }
 
@@ -581,6 +604,7 @@ mdopen(SMgrRelation reln, ForkNumber forknum, int behavior)
 	MdfdVec    *mdfd;
 	char	   *path;
 	File		fd;
+	int         flags = O_RDWR | PG_BINARY;
 
 	/* No work if already open */
 	if (reln->md_fd[forknum])
@@ -588,7 +612,12 @@ mdopen(SMgrRelation reln, ForkNumber forknum, int behavior)
 
 	path = relpath(reln->smgr_rnode, forknum);
 
-	fd = PathNameOpenFile(path, O_RDWR | PG_BINARY, 0600);
+	if (md_use_compression(reln, forknum))
+	{
+		flags |= PG_COMPRESSION;
+	}
+
+	fd = PathNameOpenFile(path, flags, 0600);
 
 	if (fd < 0)
 	{
@@ -599,7 +628,7 @@ mdopen(SMgrRelation reln, ForkNumber forknum, int behavior)
 		 * substitute for mdcreate() in bootstrap mode only. (See mdcreate)
 		 */
 		if (IsBootstrapProcessingMode())
-			fd = PathNameOpenFile(path, O_RDWR | O_CREAT | O_EXCL | PG_BINARY, 0600);
+			fd = PathNameOpenFile(path, O_CREAT | O_EXCL | flags, 0600);
 		if (fd < 0)
 		{
 			if ((behavior & EXTENSION_RETURN_NULL) &&
@@ -1748,6 +1777,11 @@ _mdfd_openseg(SMgrRelation reln, ForkNumber forknum, BlockNumber segno,
 	MdfdVec    *v;
 	int			fd;
 	char	   *fullpath;
+
+	if (md_use_compression(reln, forknum))
+	{
+		oflags |= PG_COMPRESSION;
+	}
 
 	fullpath = _mdfd_segpath(reln, forknum, segno);
 

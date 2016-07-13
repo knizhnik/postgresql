@@ -67,6 +67,7 @@
 #include <limits.h>
 #include <unistd.h>
 #include <fcntl.h>
+
 #ifdef HAVE_SYS_RESOURCE_H
 #include <sys/resource.h>		/* for getrlimit */
 #endif
@@ -76,13 +77,14 @@
 #include "access/xlog.h"
 #include "catalog/catalog.h"
 #include "catalog/pg_tablespace.h"
+#include "port/atomics.h"
 #include "pgstat.h"
 #include "portability/mem.h"
 #include "storage/fd.h"
+#include "storage/zfs.h"
 #include "storage/ipc.h"
 #include "utils/guc.h"
 #include "utils/resowner_private.h"
-
 
 /* Define PG_FLUSH_DATA_WORKS if we have an implementation for pg_flush_data */
 #if defined(HAVE_SYNC_FILE_RANGE)
@@ -166,6 +168,7 @@ int			max_safe_fds = 32;	/* default if not changed */
 #define FD_TEMPORARY		(1 << 0)	/* T = delete when closed */
 #define FD_XACT_TEMPORARY	(1 << 1)	/* T = delete at eoXact */
 
+
 typedef struct vfd
 {
 	int			fd;				/* current FD, or VFD_CLOSED if none */
@@ -180,6 +183,9 @@ typedef struct vfd
 	/* NB: fileName is malloc'd, and must be free'd when closing the VFD */
 	int			fileFlags;		/* open(2) flags for (re)opening the file */
 	int			fileMode;		/* mode to pass to open(2) */
+	int         md;             /* memory mapped file with block map */
+	FileMap*    map;            /* map for compressed pages */
+	uint64      generation;     /* generation of of compressed file (used by GC) */
 } Vfd;
 
 /*
@@ -894,7 +900,7 @@ BasicOpenFile(FileName fileName, int fileFlags, int fileMode)
 	int			fd;
 
 tryAgain:
-	fd = open(fileName, fileFlags, fileMode);
+	fd = open(fileName, fileFlags & ~PG_COMPRESSION, fileMode);
 
 	if (fd >= 0)
 		return fd;				/* success! */
@@ -970,15 +976,26 @@ LruDelete(File file)
 	/* delete the vfd record from the LRU ring */
 	Delete(file);
 
-	/* save the seek position */
-	vfdP->seekPos = lseek(vfdP->fd, (off_t) 0, SEEK_CUR);
-	Assert(vfdP->seekPos != (off_t) -1);
+	if (vfdP->fileFlags & PG_COMPRESSION) 
+	{ 
+		if (zfs_munmap(vfdP->map))
+			elog(ERROR, "could not unmap file \"%s.map\": %m", vfdP->fileName);
+		
+		if (close(vfdP->md))
+			elog(ERROR, "could not close map file \"%s.map\": %m", vfdP->fileName);
 
+		vfdP->md = VFD_CLOSED;
+		nfile -= 2;
+	} else {
+		/* save the seek position */
+		vfdP->seekPos = lseek(vfdP->fd, (off_t) 0, SEEK_CUR);
+		Assert(vfdP->seekPos != (off_t) -1);
+		nfile -= 1;
+	}
 	/* close the file */
 	if (close(vfdP->fd))
 		elog(ERROR, "could not close file \"%s\": %m", vfdP->fileName);
 
-	--nfile;
 	vfdP->fd = VFD_CLOSED;
 }
 
@@ -1036,16 +1053,39 @@ LruInsert(File file)
 		else
 		{
 			DO_DB(elog(LOG, "RE_OPEN SUCCESS"));
-			++nfile;
 		}
-
-		/* seek to the right position */
-		if (vfdP->seekPos != (off_t) 0)
-		{
-			off_t returnValue PG_USED_FOR_ASSERTS_ONLY;
-
-			returnValue = lseek(vfdP->fd, vfdP->seekPos, SEEK_SET);
-			Assert(returnValue != (off_t) -1);
+		if (vfdP->fileFlags & PG_COMPRESSION) { 
+			char* mapFileName = psprintf("%s.map", vfdP->fileName);
+			vfdP->md = open(mapFileName, vfdP->fileFlags & ~PG_COMPRESSION, vfdP->fileMode);
+			pfree(mapFileName);
+			if (vfdP->md < 0)
+			{
+				elog(LOG, "RE_OPEN MAP FAILED: %d", errno);
+				close(vfdP->fd);
+				vfdP->fd = VFD_CLOSED;
+				return -1;
+			}
+			vfdP->map = zfs_mmap(vfdP->md);
+			if (vfdP->map == MAP_FAILED) 
+			{
+				elog(LOG, "RE_MAP FAILED: %d", errno);
+				close(vfdP->fd);
+				close(vfdP->md);
+				vfdP->fd = VFD_CLOSED;
+				vfdP->md = VFD_CLOSED;
+				return -1;
+			}
+			nfile += 2;
+		} else { 
+			/* seek to the right position */
+			if (vfdP->seekPos != (off_t) 0)
+			{
+				off_t returnValue PG_USED_FOR_ASSERTS_ONLY;
+				
+				returnValue = lseek(vfdP->fd, vfdP->seekPos, SEEK_SET);
+				Assert(returnValue != (off_t) -1);
+			}
+			nfile += 1;
 		}
 	}
 
@@ -1200,7 +1240,6 @@ FileAccess(File file)
 		Delete(file);
 		Insert(file);
 	}
-
 	return 0;
 }
 
@@ -1230,6 +1269,7 @@ PathNameOpenFile(FileName fileName, int fileFlags, int fileMode)
 	char	   *fnamecopy;
 	File		file;
 	Vfd		   *vfdP;
+	int			save_errno;
 
 	DO_DB(elog(LOG, "PathNameOpenFile: %s %x %o",
 			   fileName, fileFlags, fileMode));
@@ -1253,12 +1293,42 @@ PathNameOpenFile(FileName fileName, int fileFlags, int fileMode)
 
 	if (vfdP->fd < 0)
 	{
-		int			save_errno = errno;
-
+		save_errno = errno;
+	io_error:
 		FreeVfd(file);
 		free(fnamecopy);
 		errno = save_errno;
 		return -1;
+	}
+	if (fileFlags & PG_COMPRESSION) 
+	{ 
+		char* mapFileName = psprintf("%s.map", fileName);
+		vfdP->md = open(mapFileName, O_CREAT | (fileFlags & ~(PG_COMPRESSION|O_EXCL)), fileMode);
+		pfree(mapFileName);
+		if (vfdP->md < 0)
+		{
+			save_errno = errno;
+			close(vfdP->fd);
+			vfdP->fd = VFD_CLOSED;
+			elog(LOG, "OPEN MAP FAILED: %d", errno);
+			goto io_error;
+		}
+		if (ftruncate(vfdP->md, sizeof(FileMap)) != 0)
+		{
+			elog(LOG, "OPEN MAP ftruncate FAILED: %d", errno);
+		}
+		vfdP->map = zfs_mmap(vfdP->md);
+		if (vfdP->map == MAP_FAILED) 
+		{
+			save_errno = errno;
+			close(vfdP->fd);
+			close(vfdP->md);
+			vfdP->fd = VFD_CLOSED;
+			vfdP->md = VFD_CLOSED;
+			elog(LOG, "MAP FAILED: %d", errno);
+			goto io_error;
+		}
+		++nfile;
 	}
 	++nfile;
 	DO_DB(elog(LOG, "PathNameOpenFile: success %d",
@@ -1435,6 +1505,14 @@ FileClose(File file)
 		if (close(vfdP->fd))
 			elog(ERROR, "could not close file \"%s\": %m", vfdP->fileName);
 
+		if (vfdP->fileFlags & PG_COMPRESSION) { 
+			if (zfs_munmap(vfdP->map))
+				elog(ERROR, "could not unmap file \"%s.map\": %m", vfdP->fileName);
+			
+			if (close(vfdP->md))
+				elog(ERROR, "could not close map file \"%s.map\": %m", vfdP->fileName);
+			--nfile;
+		}
 		--nfile;
 		vfdP->fd = VFD_CLOSED;
 	}
@@ -1469,6 +1547,14 @@ FileClose(File file)
 		/* in any case do the unlink */
 		if (unlink(vfdP->fileName))
 			elog(LOG, "could not unlink file \"%s\": %m", vfdP->fileName);
+
+		if (vfdP->fileFlags & PG_COMPRESSION) { 
+			char* mapFileName = psprintf("%s.map", vfdP->fileName);
+			if (unlink(mapFileName))
+				elog(LOG, "could not unlink file \"%s\": %m", mapFileName);
+			pfree(mapFileName);
+		}
+
 
 		/* and last report the stat results */
 		if (stat_errno == 0)
@@ -1523,13 +1609,17 @@ FilePrefetch(File file, off_t offset, int amount)
 			   file, VfdCache[file].fileName,
 			   (int64) offset, amount));
 
+	if (VfdCache[file].fileFlags & ~PG_COMPRESSION)
+	{ 		
+		return 0;
+	}
+
 	returnCode = FileAccess(file);
 	if (returnCode < 0)
 		return returnCode;
-
+	
 	returnCode = posix_fadvise(VfdCache[file].fd, offset, amount,
-							   POSIX_FADV_WILLNEED);
-
+								   POSIX_FADV_WILLNEED);
 	return returnCode;
 #else
 	Assert(FileIsValid(file));
@@ -1562,6 +1652,28 @@ FileWriteback(File file, off_t offset, off_t nbytes)
 	pg_flush_data(VfdCache[file].fd, offset, nbytes);
 }
 
+static bool
+FileLock(File file)
+{
+	Vfd *vfdP = &VfdCache[file];
+
+	zfs_lock_file(vfdP->map); /* protect file from GC */
+	
+	if (vfdP->generation != vfdP->map->generation) 
+	{
+		close(vfdP->fd);
+		vfdP->fd = VFD_CLOSED;
+		vfdP->fd = BasicOpenFile(vfdP->fileName, vfdP->fileFlags, vfdP->fileMode);
+		if (vfdP->fd < 0)
+		{
+			DO_DB(elog(LOG, "RE_OPEN FAILED: %d", errno));
+			return false;
+		}
+		vfdP->generation = vfdP->map->generation;
+	}
+	return true;
+}	
+
 int
 FileRead(File file, char *buffer, int amount)
 {
@@ -1578,11 +1690,60 @@ FileRead(File file, char *buffer, int amount)
 	if (returnCode < 0)
 		return returnCode;
 
-retry:
+	if (VfdCache[file].fileFlags & PG_COMPRESSION) {
+		off_t seekPos PG_USED_FOR_ASSERTS_ONLY;
+		FileMap* map = VfdCache[file].map;
+		FileMapEntry* entry = &map->entries[VfdCache[file].seekPos / BLCKSZ];
+		Assert(amount == BLCKSZ);
+		Assert((VfdCache[file].seekPos & (BLCKSZ-1)) == 0);
+
+		if (amount == 0) { 
+			return 0;
+		}
+
+		FileLock(file);
+
+		seekPos = lseek(VfdCache[file].fd, entry->offs, SEEK_SET);		
+		Assert(seekPos != (off_t) -1);
+
+		if (amount < BLCKSZ) { 
+			char compressedBuffer[BLCKSZ];
+			char* dst = compressedBuffer;
+			do { 
+				returnCode = read(VfdCache[file].fd, dst, amount);
+				if (returnCode > 0) { 
+					dst += returnCode;
+					amount -= returnCode;
+				} else { 
+					if (errno != EINTR) { 
+						elog(LOG, "Failed to read from compressed file: %d (%s): %m",  file, VfdCache[file].fileName);
+						zfs_unlock_file(map);
+						return returnCode;
+					}
+				}
+			} while (amount != 0);
+
+			returnCode = zfs_decompress(buffer, BLCKSZ, compressedBuffer, entry->size);
+			if (returnCode != BLCKSZ) 
+			{
+				elog(LOG, "Decompress error: %d (%s): %d",  file, VfdCache[file].fileName, returnCode);
+				VfdCache[file].seekPos = FileUnknownPos;
+				returnCode = -1;
+				errno = EIO;
+			} else {
+				VfdCache[file].seekPos += BLCKSZ;
+			}
+			zfs_unlock_file(map);
+			return returnCode;
+		}
+	}
+  retry:
 	returnCode = read(VfdCache[file].fd, buffer, amount);
 
 	if (returnCode >= 0)
+	{
 		VfdCache[file].seekPos += returnCode;
+	}
 	else
 	{
 		/*
@@ -1613,14 +1774,18 @@ retry:
 		/* Trouble, so assume we don't know the file position anymore */
 		VfdCache[file].seekPos = FileUnknownPos;
 	}
-
+	if (VfdCache[file].fileFlags & PG_COMPRESSION) 
+	{
+		zfs_unlock_file(VfdCache[file].map);
+	}
 	return returnCode;
 }
 
 int
 FileWrite(File file, char *buffer, int amount)
 {
-	int			returnCode;
+	int  returnCode;	
+	char compressedBuffer[ZFS_MAX_COMPRESSED_SIZE(BLCKSZ)];
 
 	Assert(FileIsValid(file));
 
@@ -1658,6 +1823,41 @@ FileWrite(File file, char *buffer, int amount)
 		}
 	}
 
+	if (VfdCache[file].fileFlags & PG_COMPRESSION) 
+	{
+		uint32   pos;
+		off_t    seekPos PG_USED_FOR_ASSERTS_ONLY;
+		FileMap* map = VfdCache[file].map;
+		FileMapEntry* entry = &map->entries[VfdCache[file].seekPos / BLCKSZ];
+		uint32   compressedSize;
+		Assert(amount == BLCKSZ);
+
+		compressedSize = (uint32)zfs_compress(compressedBuffer, sizeof(compressedBuffer), buffer, BLCKSZ);
+
+		FileLock(file);
+
+		if (compressedSize > 0 && compressedSize < ZFS_MIN_COMPRESSED_SIZE(BLCKSZ)) { 
+			Assert((VfdCache[file].seekPos & (BLCKSZ-1)) == 0);
+			/* Do not check that new image of compressed page fits into 
+			 * old space because we want to write all updated pages sequentially */
+			pos = zfs_alloc_page(map, entry->size, compressedSize);						
+			entry->size = compressedSize;
+			entry->offs = pos;
+			buffer = compressedBuffer;
+			amount = compressedSize;
+		} else { 
+			if (entry->size != BLCKSZ) { 
+				pos = zfs_alloc_page(map, entry->size, BLCKSZ);						
+				entry->offs = pos;
+				entry->size = BLCKSZ;
+			} else { 
+				/* For uncompressed pages we use update  in-place. It contradicts with sequential write policy described above. */
+				pos = entry->offs;
+			}
+		}
+		seekPos = lseek(VfdCache[file].fd, pos, SEEK_SET);
+		Assert(seekPos != (off_t) -1);
+	}
 retry:
 	errno = 0;
 	returnCode = write(VfdCache[file].fd, buffer, amount);
@@ -1668,7 +1868,20 @@ retry:
 
 	if (returnCode >= 0)
 	{
-		VfdCache[file].seekPos += returnCode;
+		if (VfdCache[file].fileFlags & PG_COMPRESSION) { 
+			if (returnCode == amount)
+			{				
+				VfdCache[file].seekPos += BLCKSZ;
+				zfs_extend(VfdCache[file].map, VfdCache[file].seekPos);
+				returnCode = BLCKSZ;
+			} else { 
+				returnCode = 0;
+			}
+		} 
+		else 
+		{ 
+			VfdCache[file].seekPos += returnCode;
+		}
 
 		/* maintain fileSize and temporary_files_size if it's a temp file */
 		if (VfdCache[file].fdstate & FD_TEMPORARY)
@@ -1708,7 +1921,10 @@ retry:
 		/* Trouble, so assume we don't know the file position anymore */
 		VfdCache[file].seekPos = FileUnknownPos;
 	}
-
+	if (VfdCache[file].fileFlags & PG_COMPRESSION) 
+	{
+		zfs_unlock_file(VfdCache[file].map);
+	}
 	return returnCode;
 }
 
@@ -1726,7 +1942,16 @@ FileSync(File file)
 	if (returnCode < 0)
 		return returnCode;
 
-	return pg_fsync(VfdCache[file].fd);
+	returnCode = pg_fsync(VfdCache[file].fd);
+	if (returnCode == 0 && (VfdCache[file].fileFlags & PG_COMPRESSION)) 
+	{
+		returnCode = zfs_msync(VfdCache[file].map);
+		if (returnCode == 0)
+		{		
+			returnCode = pg_fsync(VfdCache[file].md);
+		}
+	}
+	return returnCode;
 }
 
 off_t
@@ -1741,7 +1966,7 @@ FileSeek(File file, off_t offset, int whence)
 			   (int64) VfdCache[file].seekPos,
 			   (int64) offset, whence));
 
-	if (FileIsNotOpen(file))
+	if (FileIsNotOpen(file) || (VfdCache[file].fileFlags & PG_COMPRESSION))
 	{
 		switch (whence)
 		{
@@ -1755,11 +1980,20 @@ FileSeek(File file, off_t offset, int whence)
 				VfdCache[file].seekPos += offset;
 				break;
 			case SEEK_END:
-				returnCode = FileAccess(file);
-				if (returnCode < 0)
-					return returnCode;
-				VfdCache[file].seekPos = lseek(VfdCache[file].fd,
-											   offset, whence);
+			  returnCode = FileAccess(file);
+			  if (returnCode < 0)
+				  return returnCode;
+			    if (VfdCache[file].fileFlags & PG_COMPRESSION) {
+					FileMap* map = VfdCache[file].map;
+					uint32 fileSize = pg_atomic_read_u32(&map->virtSize);
+					if (offset > 0 && offset > fileSize) { 
+						offset = fileSize;
+					}
+					VfdCache[file].seekPos = fileSize - offset;
+			    }  else { 
+					VfdCache[file].seekPos = lseek(VfdCache[file].fd,
+												   offset, whence);
+				}
 				break;
 			default:
 				elog(ERROR, "invalid whence: %d", whence);
@@ -1823,8 +2057,18 @@ FileTruncate(File file, off_t offset)
 	if (returnCode < 0)
 		return returnCode;
 
-	returnCode = ftruncate(VfdCache[file].fd, offset);
-
+	if (VfdCache[file].fileFlags & PG_COMPRESSION) {
+		int i;
+		FileMap* map = VfdCache[file].map;
+		Assert((offset & (BLCKSZ-1)) == 0);
+		for (i = offset / BLCKSZ; i < RELSEG_SIZE; i++) {  
+			map->entries[i].size = 0;
+		}
+		pg_atomic_write_u32(&map->virtSize, offset);
+		returnCode = 0;
+	} else  {
+		returnCode = ftruncate(VfdCache[file].fd, offset);
+	}
 	if (returnCode == 0 && VfdCache[file].fileSize > offset)
 	{
 		/* adjust our state for truncation of a temp file */
@@ -1832,7 +2076,6 @@ FileTruncate(File file, off_t offset)
 		temporary_files_size -= VfdCache[file].fileSize - offset;
 		VfdCache[file].fileSize = offset;
 	}
-
 	return returnCode;
 }
 
@@ -1872,7 +2115,7 @@ int
 FileGetRawFlags(File file)
 {
 	Assert(FileIsValid(file));
-	return VfdCache[file].fileFlags;
+	return VfdCache[file].fileFlags & ~PG_COMPRESSION;
 }
 
 /*
@@ -2769,6 +3012,10 @@ looks_like_temp_rel_name(const char *name)
 	{
 		int			segchar;
 
+		if (strcmp(&name[pos+1], "map") == 0) 
+		{
+			return true;
+		}
 		for (segchar = 1; isdigit((unsigned char) name[pos + segchar]); ++segchar)
 			;
 		if (segchar <= 1)

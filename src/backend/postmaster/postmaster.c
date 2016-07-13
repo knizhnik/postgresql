@@ -115,6 +115,7 @@
 #include "postmaster/syslogger.h"
 #include "replication/walsender.h"
 #include "storage/fd.h"
+#include "storage/zfs.h"
 #include "storage/ipc.h"
 #include "storage/pg_shmem.h"
 #include "storage/pmsignal.h"
@@ -1239,6 +1240,11 @@ PostmasterMain(int argc, char *argv[])
 	 * Initialize the autovacuum subsystem (again, no process start yet)
 	 */
 	autovac_init();
+
+	/*
+	 * Initialize compressed file sysystem support
+	 */
+	zfs_initialize();
 
 	/*
 	 * Load configuration files for client authentication.

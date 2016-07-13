@@ -66,6 +66,7 @@
 #include "storage/dsm_impl.h"
 #include "storage/standby.h"
 #include "storage/fd.h"
+#include "storage/zfs.h"
 #include "storage/pg_shmem.h"
 #include "storage/proc.h"
 #include "storage/predicate.h"
@@ -2807,7 +2808,41 @@ static struct config_int ConfigureNamesInt[] =
 		NULL, NULL, NULL
 	},
 
-	/* End-of-list marker */
+	{
+		{"zfs_gc_workers", PGC_POSTMASTER, UNGROUPED,
+		 gettext_noop("Number of ZFS backrground garbage collection workers"),
+		 NULL,
+		 0
+        },
+		&zfs_gc_workers,
+        1, 0, 100,
+        NULL, NULL, NULL
+    },
+
+	{
+		{"zfs_gc_threshold", PGC_POSTMASTER, UNGROUPED,
+		 gettext_noop("Percent of garbage in file after file is comactified"),
+		 NULL,
+		 0
+        },
+		&zfs_gc_threshold,
+        50, 0, 100,
+        NULL, NULL, NULL
+    },
+
+
+	{
+		{"zfs_gc_timeout", PGC_POSTMASTER, UNGROUPED,
+		 gettext_noop("Delay in seconds between ZFS garbage collection iterations"),
+		 NULL,
+		 GUC_UNIT_S
+        },
+		&zfs_gc_timeout,
+        5, 0, INT_MAX,
+        NULL, NULL, NULL
+    },
+
+/* End-of-list marker */
 	{
 		{NULL, 0, 0, NULL, NULL}, NULL, 0, 0, 0, NULL, NULL, NULL
 	}
