@@ -49,6 +49,9 @@ int zfs_gc_workers;
 int zfs_gc_threshold;
 int zfs_gc_timeout;
 
+static bool zfs_read_file(int fd, void* data, uint32 size);
+static bool zfs_write_file(int fd, void const* data, uint32 size);
+
 #if ZFS_COMPRESSOR == SNAPPY_COMPRESSOR
 
 #include <snappy-c.h>
@@ -61,6 +64,11 @@ size_t zfs_compress(void* dst, size_t dst_size, void const* src, size_t src_size
 size_t zfs_decompress(void* dst, size_t dst_size, void const* src, size_t src_size)
 {
     return snappy_uncompress(src, src_size, dst, &dst_size) == SNAPPY_OK ? dst_size : 0;
+}
+
+char const* zfs_algorithm()
+{
+	return "snappy";
 }
 
 #elif ZFS_COMPRESSOR == LZFSE_COMPRESSOR
@@ -83,6 +91,11 @@ size_t zfs_decompress(void* dst, size_t dst_size, void const* src, size_t src_si
 	return rc;
 }
 
+char const* zfs_algorithm()
+{
+	return "lzfse";
+}
+
 #elif ZFS_COMPRESSOR == LZ4_COMPRESSOR
 
 #include <lz4.h>
@@ -95,6 +108,11 @@ size_t zfs_compress(void* dst, size_t dst_size, void const* src, size_t src_size
 size_t zfs_decompress(void* dst, size_t dst_size, void const* src, size_t src_size)
 {
     return LZ4_decompress_safe(src, dst, src_size, dst_size);
+}
+
+char const* zfs_algorithm()
+{
+	return "lz4";
 }
 
 #elif ZFS_COMPRESSOR == ZLIB_COMPRESSOR
@@ -113,6 +131,11 @@ size_t zfs_decompress(void* dst, size_t dst_size, void const* src, size_t src_si
     return uncompress(dst, &dest_len, src, src_size) == Z_OK ? dest_len : 0;
 }
 
+char const* zfs_algorithm()
+{
+	return "zlib";
+}
+
 #else
 
 #include <common/pg_lzcompress.h>
@@ -125,6 +148,11 @@ size_t zfs_compress(void* dst, size_t dst_size, void const* src, size_t src_size
 size_t zfs_decompress(void* dst, size_t dst_size, void const* src, size_t src_size)
 {
 	return pglz_decompress(src, src_size, dst, dst_size);
+}
+
+char const* zfs_algorithm()
+{
+	return "pglz";
 }
 
 #endif
@@ -147,7 +175,7 @@ int zfs_munmap(FileMap* map)
 	return munmap(map, sizeof(FileMap));
 }
 
-void zfs_lock_file(FileMap* map)
+void zfs_lock_file(FileMap* map, char const* file_path)
 {
 	long delay = ZFS_LOCK_MIN_TIMEOUT;
 	while (true) { 
@@ -155,6 +183,33 @@ void zfs_lock_file(FileMap* map)
 		if (count < ZFS_GC_LOCK) {
 			break;
 		} 
+		if (InRecovery) { 
+			/* Uhhh... looks like last GC was interrupted.
+			 * Try to recover file
+			 */
+			char* map_bck_path = psprintf("%s.map.bck", file_path);
+			char* file_bck_path = psprintf("%s.bck", file_path);
+			if (access(file_bck_path, R_OK) != 0) {
+				/* There is no backup file: new map should be constructed */					
+				int md2 = open(map_bck_path, O_RDWR|PG_BINARY, 0);
+				if (md2 >= 0) { 
+					/* Recover map */
+					if (!zfs_read_file(md2, map, sizeof(FileMap))) { 
+						elog(LOG, "Failed to read file %s: %m", map_bck_path);
+					}
+					close(md2);
+				} 
+			} else { 
+				/* Presence of backup file means that we still have unchanged data and map files.
+				 * Just remove backup files, grab lock and continue processing
+				 */
+				unlink(file_bck_path);
+				unlink(map_bck_path);
+			}
+			pfree(file_bck_path);
+			pfree(map_bck_path);
+			break;
+		}
 		pg_atomic_fetch_sub_u32(&map->lock, 1);
 		pg_usleep(delay);
 		if (delay < ZFS_LOCK_MAX_TIMEOUT) { 

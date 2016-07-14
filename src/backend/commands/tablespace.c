@@ -48,6 +48,7 @@
 
 #include <unistd.h>
 #include <dirent.h>
+#include <stdio.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 
@@ -72,6 +73,7 @@
 #include "miscadmin.h"
 #include "postmaster/bgwriter.h"
 #include "storage/fd.h"
+#include "storage/zfs.h"
 #include "storage/lmgr.h"
 #include "storage/standby.h"
 #include "utils/acl.h"
@@ -79,6 +81,7 @@
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
+#include "utils/spccache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
 #include "utils/tqual.h"
@@ -624,6 +627,16 @@ create_tablespace_directories(const char *location, const Oid tablespaceoid)
 					(errcode_for_file_access(),
 					 errmsg("could not create directory \"%s\": %m",
 							location_with_version_dir)));
+	}
+
+	if (is_tablespace_compressed(tablespaceoid)) 
+	{
+		char* compressionFilePath = psprintf("%s/compression", location_with_version_dir);
+		FILE* comp = fopen(compressionFilePath, "w");
+		elog(LOG, "Create compressed tablespace at %s", location);
+		fputs(zfs_algorithm(), comp);
+		fclose(comp);
+		pfree(compressionFilePath);
 	}
 
 	/*

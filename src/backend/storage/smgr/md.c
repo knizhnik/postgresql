@@ -32,6 +32,7 @@
 #include "portability/instr_time.h"
 #include "postmaster/bgwriter.h"
 #include "storage/fd.h"
+#include "storage/zfs.h"
 #include "storage/bufmgr.h"
 #include "storage/relfilenode.h"
 #include "storage/smgr.h"
@@ -201,20 +202,54 @@ static MdfdVec *_mdfd_getseg(SMgrRelation reln, ForkNumber forkno,
 static BlockNumber _mdnblocks(SMgrRelation reln, ForkNumber forknum,
 		   MdfdVec *seg);
 
-/* TODO: make it possibleto switch on compression only for particular tables or tablespaces */
+typedef struct
+{
+	Oid  tblspOid;
+	bool compressed;
+} TablespaceStatus;
+
 static bool md_use_compression(SMgrRelation reln, ForkNumber forknum)
 {
-	bool zfs_tablespace;
+	static HTAB* tblspaceMap; 
+	char* compressionFilePath;
+	FILE* compressionFile;
+	bool found;
+	TablespaceStatus* ts;
+
 	if (forknum != MAIN_FORKNUM
 		|| reln->smgr_rnode.node.spcNode == DEFAULTTABLESPACE_OID 
 		|| reln->smgr_rnode.node.spcNode == GLOBALTABLESPACE_OID)
 	{
 		return false;
 	}
-	StartTransactionCommand();
-	zfs_tablespace = is_tablespace_compressed(reln->smgr_rnode.node.spcNode); 
-	CommitTransactionCommand();
-	return zfs_tablespace;
+	if (tblspaceMap == NULL) { 
+		HASHCTL ctl = {0};
+		ctl.keysize = sizeof(Oid);
+		ctl.entrysize = sizeof(TablespaceStatus);
+		tblspaceMap = hash_create("tablespace_map", 256, &ctl, HASH_ELEM);
+	}
+	ts = hash_search(tblspaceMap, &reln->smgr_rnode.node.spcNode, HASH_ENTER, &found);
+	if (!found) { 
+		compressionFilePath = psprintf("pg_tblspc/%u/%s/compression", 
+									   reln->smgr_rnode.node.spcNode,
+									   TABLESPACE_VERSION_DIRECTORY);
+		compressionFile = fopen(compressionFilePath, "r");
+		if (compressionFile != NULL)  { 
+			char algorithm[64];
+			if (fgets(algorithm, sizeof algorithm, compressionFile) == NULL) { 
+				elog(ERROR, "Failed to read compression info file %s: %m", compressionFilePath);
+			}
+			if (strcmp(algorithm, zfs_algorithm()) != 0) { 
+				elog(ERROR, "Tablespace was compressed using %s algorithm, but %s is currently used", 
+					 algorithm, zfs_algorithm());
+			}
+			fclose(compressionFile);
+			ts->compressed = true;
+		} else { 
+			ts->compressed = false;
+		}
+	}
+	return ts->compressed;
 }
 
 

@@ -1657,7 +1657,7 @@ FileLock(File file)
 {
 	Vfd *vfdP = &VfdCache[file];
 
-	zfs_lock_file(vfdP->map); /* protect file from GC */
+	zfs_lock_file(vfdP->map, vfdP->fileName); /* protect file from GC */
 	
 	if (vfdP->generation != vfdP->map->generation) 
 	{

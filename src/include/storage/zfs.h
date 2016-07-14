@@ -1,6 +1,8 @@
 #ifndef __ZFS_H__
 #define __ZFS_H__
 
+#include "port/atomics.h"
+
 #define ZFS_GC_LOCK  0x80000000
 
 #define ZFS_LOCK_MIN_TIMEOUT 100    /* microseconds */
@@ -21,6 +23,7 @@
 
 size_t zfs_compress(void* dst, size_t dst_size, void const* src, size_t src_size);
 size_t zfs_decompress(void* dst, size_t dst_size, void const* src, size_t src_size);
+char const* zfs_algorithm(void);
 
 typedef struct 
 {
@@ -38,7 +41,7 @@ typedef struct
 	FileMapEntry     entries[RELSEG_SIZE];
 } FileMap;
 
-void     zfs_lock_file(FileMap* map);
+void     zfs_lock_file(FileMap* map, char const* path);
 void     zfs_unlock_file(FileMap* map);
 uint32   zfs_alloc_page(FileMap* map, uint32 oldSize, uint32 newSize);
 void     zfs_extend(FileMap* map, uint32 pos);
