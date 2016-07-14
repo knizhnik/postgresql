@@ -58,6 +58,7 @@
 #include "utils/memutils.h"
 #include "utils/resowner.h"
 #include "utils/timestamp.h"
+#include "utils/syscache.h"
 
 
 /*
@@ -166,6 +167,8 @@ BackgroundWriterMain(void)
 	MemoryContextSwitchTo(bgwriter_context);
 
 	WritebackContextInit(&wb_context, &bgwriter_flush_after);
+
+	InitCatalogCache();
 
 	/*
 	 * If an exception is encountered, processing resumes here.

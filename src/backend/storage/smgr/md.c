@@ -204,11 +204,19 @@ static BlockNumber _mdnblocks(SMgrRelation reln, ForkNumber forknum,
 /* TODO: make it possibleto switch on compression only for particular tables or tablespaces */
 static bool md_use_compression(SMgrRelation reln, ForkNumber forknum)
 {
-	return  
+	static bool recursive;
+	bool zfs_tablespace;
+	if (recursive) { 
+		return false;
+	}
+	recursive = true;
+	zfs_tablespace = 
 		reln->smgr_rnode.node.spcNode != DEFAULTTABLESPACE_OID 
 		&& reln->smgr_rnode.node.spcNode != GLOBALTABLESPACE_OID
 		&& is_tablespace_compressed(reln->smgr_rnode.node.spcNode) 
 		&& forknum == MAIN_FORKNUM;
+	recursive = false;
+	return zfs_tablespace;
 }
 
 
