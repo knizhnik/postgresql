@@ -327,7 +327,8 @@ static bool zfs_gc_file(char* map_path)
 	FileMap* map;
 	uint32 physSize;
 	uint32 usedSize;
-	size_t suf = strlen(map_path)-4;
+	uint32 virtSize;
+	int suf = strlen(map_path)-4;
 	int fd = -1, fd2 = -1, md2 = -1;
 	bool succeed = true;
 
@@ -343,7 +344,8 @@ static bool zfs_gc_file(char* map_path)
 	}
 	usedSize = pg_atomic_read_u32(&map->usedSize);
 	physSize = pg_atomic_read_u32(&map->physSize);
-
+	virtSize = pg_atomic_read_u32(&map->virtSize);
+		
 	if ((physSize - usedSize)*100 > physSize*zfs_gc_threshold) /* do we need to perform defragmentation? */
 	{ 
 		long delay = ZFS_LOCK_MIN_TIMEOUT;		
@@ -354,7 +356,6 @@ static bool zfs_gc_file(char* map_path)
 		uint32 newSize = 0;
 		FileMapEntry** entries = (FileMapEntry**)palloc(RELSEG_SIZE*sizeof(FileMapEntry*));
 		bool remove_backups = true;
-		uint32 virtSize = pg_atomic_read_u32(&map->virtSize);
 		int n_pages;
 		int i;
 
@@ -544,8 +545,8 @@ static bool zfs_gc_file(char* map_path)
 		pfree(entries);
 		pfree(newMap);
 	} else if (zfs_state->max_iterations == 1) { 
-		elog(LOG, "%d: file %s: physical size %d, logical size %d, used %d, compression ratio %f",
-			 MyProcPid, file_path, physSize, newSize, virtSize, usedSize, (double)virtSize/physSize);
+		elog(LOG, "%d: file %.*s: physical size %d, logical size %d, used %d, compression ratio %f",
+			 MyProcPid, suf, map_path, physSize, virtSize, usedSize, (double)virtSize/physSize);
 	}
 	
 	if (zfs_munmap(map) < 0) { 
@@ -635,8 +636,9 @@ void zfs_start_background_gc()
 	zfs_state->n_workers = zfs_gc_workers;
 
 	for (i = 0; i < zfs_gc_workers; i++) {
-		BackgroundWorker worker = {0};	
+		BackgroundWorker worker;	
 		BackgroundWorkerHandle* handle;
+		MemSet(&worker, 0, sizeof(worker));
 		sprintf(worker.bgw_name, "zfs-worker-%d", i);
 		worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
 		worker.bgw_start_time = BgWorkerStart_ConsistentState;
@@ -670,7 +672,8 @@ Datum zfs_start_gc(PG_FUNCTION_ARGS)
 		handles = (BackgroundWorkerHandle**)palloc(zfs_state->n_workers*sizeof(BackgroundWorkerHandle*));		
 
 		for (i = 0; i < zfs_state->n_workers; i++) {
-			BackgroundWorker worker = {0};
+			BackgroundWorker worker;
+			MemSet(&worker, 0, sizeof(worker));
 			sprintf(worker.bgw_name, "zfs-worker-%d", i);
 			worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
 			worker.bgw_start_time = BgWorkerStart_ConsistentState;
