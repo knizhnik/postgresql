@@ -356,7 +356,7 @@ static bool zfs_gc_file(char* map_path)
 		uint32 newSize = 0;
 		FileMapEntry** entries = (FileMapEntry**)palloc(RELSEG_SIZE*sizeof(FileMapEntry*));
 		bool remove_backups = true;
-		int n_pages;
+		int n_pages = virtSize / BLCKSZ;
 		int i;
 
 		memcpy(file_path, map_path, suf);
@@ -406,7 +406,6 @@ static bool zfs_gc_file(char* map_path)
 		if (md2 < 0) { 
 			goto Cleanup;
 		}
-		n_pages = virtSize / BLCKSZ;
 		for (i = 0; i < n_pages; i++) { 
 			newMap->entries[i] = map->entries[i];
 			entries[i] = &newMap->entries[i];
