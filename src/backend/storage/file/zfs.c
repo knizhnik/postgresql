@@ -53,6 +53,8 @@ int zfs_gc_timeout;
 typedef struct
 {
 	pg_atomic_flag gc_started;
+	int            n_workers;
+	int            max_iterations;
 } ZfsState;
 
 
@@ -61,6 +63,8 @@ static bool zfs_write_file(int fd, void const* data, uint32 size);
 static void zfs_start_background_gc(void);
 
 static ZfsState* zfs_state;
+static bool      zfs_stop;
+
 
 #if ZFS_COMPRESSOR == SNAPPY_COMPRESSOR
 
@@ -168,8 +172,6 @@ char const* zfs_algorithm()
 #endif
 
 
-static bool zfs_stop;
-
 
 void zfs_initialize()
 {
@@ -233,7 +235,7 @@ void zfs_lock_file(FileMap* map, char const* file_path)
 			delay *= 2;
 		}
 	}
-	if (IsUnderPostmaster && pg_atomic_test_set_flag(&zfs_state->gc_started))
+	if (IsUnderPostmaster && zfs_gc_workers != 0 && pg_atomic_test_set_flag(&zfs_state->gc_started))
 	{
 		zfs_start_background_gc();
 	}
@@ -575,7 +577,7 @@ static bool zfs_gc_directory(int worker_id, char const* path)
 			if (len > 4 && 
 				strcmp(file_path + len - 4, ".map") == 0) 
 			{ 
-				if (entry->d_ino % zfs_gc_workers == worker_id && !zfs_gc_file(file_path))
+				if (entry->d_ino % zfs_state->n_workers == worker_id && !zfs_gc_file(file_path))
 				{ 
 					success = false;
 					break;
@@ -618,7 +620,7 @@ static void zfs_bgworker_main(Datum arg)
     /* We're now ready to receive signals */
     BackgroundWorkerUnblockSignals();
 
-	while (zfs_scan_tablespace(worker_id) && !zfs_stop) { 
+	while (zfs_scan_tablespace(worker_id) && !zfs_stop && --zfs_state->max_iterations >= 0) { 
 		pg_usleep(zfs_gc_timeout*USECS_PER_SEC);
 	}
 }
@@ -626,11 +628,14 @@ static void zfs_bgworker_main(Datum arg)
 void zfs_start_background_gc()
 {
 	int i;
+	zfs_state->max_iterations = INT_MAX;
+	zfs_state->n_workers = zfs_gc_workers;
+
 	for (i = 0; i < zfs_gc_workers; i++) {
 		BackgroundWorker worker;	
 		BackgroundWorkerHandle* handle;
 		sprintf(worker.bgw_name, "zfs-worker-%d", i);
-		worker.bgw_flags = 0;
+		worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
 		worker.bgw_start_time = BgWorkerStart_ConsistentState;
 		worker.bgw_restart_time = 1;
 		worker.bgw_main = zfs_bgworker_main;
@@ -655,15 +660,16 @@ Datum zfs_start_gc(PG_FUNCTION_ARGS)
 		int j;
 		BackgroundWorkerHandle** handles;
 
-		zfs_gc_workers = PG_GETARG_INT32(0);
 		zfs_stop = true; /* do just one iteration */	   
 
-		handles = (BackgroundWorkerHandle**)palloc(zfs_gc_workers*sizeof(BackgroundWorkerHandle*));
+		handles = (BackgroundWorkerHandle**)palloc(zfs_gc_workers*sizeof(BackgroundWorkerHandle*));		
+		zfs_state->max_iterations = 1;
+		zfs_state->n_workers = PG_GETARG_INT32(0);
 
-		for (i = 0; i < zfs_gc_workers; i++) {
+		for (i = 0; i < zfs_state->n_workers; i++) {
 			BackgroundWorker worker;
 			sprintf(worker.bgw_name, "zfs-worker-%d", i);
-			worker.bgw_flags = 0;
+			worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
 			worker.bgw_start_time = BgWorkerStart_ConsistentState;
 			worker.bgw_restart_time = 1;
 			worker.bgw_main = zfs_bgworker_main;
@@ -676,7 +682,6 @@ Datum zfs_start_gc(PG_FUNCTION_ARGS)
 			WaitForBackgroundWorkerShutdown(handles[j]);
 		}
 		pfree(handles);
-		zfs_gc_workers = 0;
 		pg_atomic_clear_flag(&zfs_state->gc_started);
 	}
 	PG_RETURN_INT32(i);
