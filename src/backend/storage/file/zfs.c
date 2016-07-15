@@ -543,6 +543,9 @@ static bool zfs_gc_file(char* map_path)
 		pfree(map_bck_path);
 		pfree(entries);
 		pfree(newMap);
+	} else if (zfs_state->max_iterations == 1) { 
+		elog(LOG, "%d: file %s: physical size %d, logical size %d, used %d, compression ratio %f",
+			 MyProcPid, file_path, physSize, newSize, virtSize, usedSize, (double)virtSize/physSize);
 	}
 	
 	if (zfs_munmap(map) < 0) { 
@@ -632,7 +635,7 @@ void zfs_start_background_gc()
 	zfs_state->n_workers = zfs_gc_workers;
 
 	for (i = 0; i < zfs_gc_workers; i++) {
-		BackgroundWorker worker;	
+		BackgroundWorker worker = {0};	
 		BackgroundWorkerHandle* handle;
 		sprintf(worker.bgw_name, "zfs-worker-%d", i);
 		worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
@@ -667,7 +670,7 @@ Datum zfs_start_gc(PG_FUNCTION_ARGS)
 		zfs_state->n_workers = PG_GETARG_INT32(0);
 
 		for (i = 0; i < zfs_state->n_workers; i++) {
-			BackgroundWorker worker;
+			BackgroundWorker worker = {0};
 			sprintf(worker.bgw_name, "zfs-worker-%d", i);
 			worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
 			worker.bgw_start_time = BgWorkerStart_ConsistentState;
