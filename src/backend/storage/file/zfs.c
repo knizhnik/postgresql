@@ -662,9 +662,9 @@ Datum zfs_start_gc(PG_FUNCTION_ARGS)
 
 		zfs_stop = true; /* do just one iteration */	   
 
-		handles = (BackgroundWorkerHandle**)palloc(zfs_gc_workers*sizeof(BackgroundWorkerHandle*));		
 		zfs_state->max_iterations = 1;
 		zfs_state->n_workers = PG_GETARG_INT32(0);
+		handles = (BackgroundWorkerHandle**)palloc(zfs_state->n_workers*sizeof(BackgroundWorkerHandle*));		
 
 		for (i = 0; i < zfs_state->n_workers; i++) {
 			BackgroundWorker worker;
