@@ -3,7 +3,7 @@
 
 #include "port/atomics.h"
 
-#define ZFS_GC_LOCK  0x80000000
+#define ZFS_GC_LOCK  0x10000000
 
 #define ZFS_LOCK_MIN_TIMEOUT 100    /* microseconds */
 #define ZFS_LOCK_MAX_TIMEOUT 10000  /* microseconds */

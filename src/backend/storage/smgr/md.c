@@ -230,7 +230,7 @@ static bool md_use_compression(SMgrRelation reln, ForkNumber forknum)
 	}
 	ts = hash_search(tblspaceMap, &reln->smgr_rnode.node.spcNode, HASH_ENTER, &found);
 	if (!found) { 
-		compressionFilePath = psprintf("pg_tblspc/%u/%s/compression", 
+		compressionFilePath = psprintf("pg_tblspc/%u/%s/pg_compression", 
 									   reln->smgr_rnode.node.spcNode,
 									   TABLESPACE_VERSION_DIRECTORY);
 		compressionFile = fopen(compressionFilePath, "r");

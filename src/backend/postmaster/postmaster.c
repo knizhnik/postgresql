@@ -1242,6 +1242,11 @@ PostmasterMain(int argc, char *argv[])
 	autovac_init();
 
 	/*
+	 * Initialize compressed file sysystem support
+	 */
+	zfs_initialize();
+
+	/*
 	 * Load configuration files for client authentication.
 	 */
 	if (!load_hba())
@@ -1298,11 +1303,6 @@ PostmasterMain(int argc, char *argv[])
 
 	/* Some workers may be scheduled to start now */
 	maybe_start_bgworker();
-
-	/*
-	 * Initialize compressed file sysystem support
-	 */
-	zfs_initialize();
 
 	status = ServerLoop();
 

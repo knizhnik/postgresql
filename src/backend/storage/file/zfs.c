@@ -49,8 +49,18 @@ int zfs_gc_workers;
 int zfs_gc_threshold;
 int zfs_gc_timeout;
 
+
+typedef struct
+{
+	pg_atomic_flag gc_started;
+} ZfsState;
+
+
 static bool zfs_read_file(int fd, void* data, uint32 size);
 static bool zfs_write_file(int fd, void const* data, uint32 size);
+static void zfs_start_background_gc(void);
+
+static ZfsState* zfs_state;
 
 #if ZFS_COMPRESSOR == SNAPPY_COMPRESSOR
 
@@ -160,6 +170,13 @@ char const* zfs_algorithm()
 
 static bool zfs_stop;
 
+
+void zfs_initialize()
+{
+	zfs_state = (ZfsState*)ShmemAlloc(sizeof(ZfsState));
+	pg_atomic_init_flag(&zfs_state->gc_started);
+}
+
 int zfs_msync(FileMap* map)
 {
 	return msync(map, sizeof(FileMap), MS_SYNC);
@@ -215,6 +232,10 @@ void zfs_lock_file(FileMap* map, char const* file_path)
 		if (delay < ZFS_LOCK_MAX_TIMEOUT) { 
 			delay *= 2;
 		}
+	}
+	if (IsUnderPostmaster && pg_atomic_test_set_flag(&zfs_state->gc_started))
+	{
+		zfs_start_background_gc();
 	}
 }
 
@@ -302,7 +323,7 @@ static bool zfs_gc_file(char* map_path)
 {
 	int md = open(map_path, O_RDWR|PG_BINARY, 0);
 	FileMap* map;
-	uint32 realSize;
+	uint32 physSize;
 	uint32 usedSize;
 	size_t suf = strlen(map_path)-4;
 	int fd = -1, fd2 = -1, md2 = -1;
@@ -319,18 +340,19 @@ static bool zfs_gc_file(char* map_path)
 		return false;
 	}
 	usedSize = pg_atomic_read_u32(&map->usedSize);
-	realSize = pg_atomic_read_u32(&map->physSize);
+	physSize = pg_atomic_read_u32(&map->physSize);
 
-	if ((realSize - usedSize)*100 > realSize*zfs_gc_threshold) /* do we need to perform defragmentation? */
+	if ((physSize - usedSize)*100 > physSize*zfs_gc_threshold) /* do we need to perform defragmentation? */
 	{ 
 		long delay = ZFS_LOCK_MIN_TIMEOUT;		
 		char* file_path = (char*)palloc(suf+1);
 		char* map_bck_path = (char*)palloc(suf+10);
 		char* file_bck_path = (char*)palloc(suf+5);
 		FileMap* newMap = (FileMap*)palloc0(sizeof(FileMap));
-		uint32 usedSize = 0;
+		uint32 newSize = 0;
 		FileMapEntry** entries = (FileMapEntry**)palloc(RELSEG_SIZE*sizeof(FileMapEntry*));
 		bool remove_backups = true;
+		uint32 virtSize = pg_atomic_read_u32(&map->virtSize);
 		int n_pages;
 		int i;
 
@@ -359,7 +381,7 @@ static bool zfs_gc_file(char* map_path)
 						}
 						close(md2);
 						md2 = -1;
-						usedSize = pg_atomic_read_u32(&newMap->usedSize);
+						newSize = pg_atomic_read_u32(&newMap->usedSize);
 						remove_backups = false;
 						goto ReplaceMap;
 					}
@@ -381,7 +403,7 @@ static bool zfs_gc_file(char* map_path)
 		if (md2 < 0) { 
 			goto Cleanup;
 		}
-		n_pages = pg_atomic_read_u32(&map->virtSize) / BLCKSZ;
+		n_pages = virtSize / BLCKSZ;
 		for (i = 0; i < n_pages; i++) { 
 			newMap->entries[i] = map->entries[i];
 			entries[i] = &newMap->entries[i];
@@ -417,11 +439,11 @@ static bool zfs_gc_file(char* map_path)
 					elog(LOG, "Failed to write file %s: %m", file_bck_path);
 					goto Cleanup;
 				}
-				entries[i]->offs = usedSize;
-				usedSize += entries[i]->size;
+				entries[i]->offs = newSize;
+				newSize += entries[i]->size;
 			}
 		}
-		pg_atomic_write_u32(&map->usedSize, usedSize);
+		pg_atomic_write_u32(&map->usedSize, newSize);
 
 		if (close(fd) < 0) { 
 			elog(LOG, "Failed to close file %s: %m", file_path);
@@ -479,8 +501,8 @@ static bool zfs_gc_file(char* map_path)
 		/* At this moment defragmented file version is stored. We can perfrom in-place update of map.
 		 * If crash happens at this point, map can be recovered from backup file */
 		memcpy(map->entries, newMap->entries, n_pages * sizeof(FileMapEntry));
-		pg_atomic_write_u32(&map->usedSize, usedSize);
-		pg_atomic_write_u32(&map->physSize, usedSize);
+		pg_atomic_write_u32(&map->usedSize, newSize);
+		pg_atomic_write_u32(&map->physSize, newSize);
 		map->generation += 1; /* force all backends to reopen the file */
 		
 		/* Before removing backup files and releasing locks we need to flush updated map file */
@@ -511,6 +533,9 @@ static bool zfs_gc_file(char* map_path)
 			succeed = false;
 		}
 		
+		elog(LOG, "%d: defragment file %s: old size %d, new size %d, logical size %d, used %d, compression ratio %f",
+			 MyProcPid, file_path, physSize, newSize, virtSize, usedSize, (double)virtSize/newSize);
+
 		pfree(file_path);
 		pfree(file_bck_path);
 		pfree(map_bck_path);
@@ -598,7 +623,7 @@ static void zfs_bgworker_main(Datum arg)
 	}
 }
 
-void zfs_initialize()
+void zfs_start_background_gc()
 {
 	int i;
 	for (i = 0; i < zfs_gc_workers; i++) {
@@ -614,10 +639,7 @@ void zfs_initialize()
 			break;
 		}
 	}
-	if (i != zfs_gc_workers) {
-		elog(LOG, "Start only %d of %d requested ZFS background workers", 
-			 i, zfs_gc_workers);
-	}
+	elog(LOG, "Start %d background ZFS background workers", i);
 }
 
 PG_MODULE_MAGIC;
@@ -628,7 +650,8 @@ Datum zfs_start_gc(PG_FUNCTION_ARGS)
 {
 	int i = 0;
 
-	if (zfs_gc_workers == 0) {
+	if (zfs_gc_workers == 0 && pg_atomic_test_set_flag(&zfs_state->gc_started)) 
+	{
 		int j;
 		BackgroundWorkerHandle** handles;
 
@@ -654,6 +677,7 @@ Datum zfs_start_gc(PG_FUNCTION_ARGS)
 		}
 		pfree(handles);
 		zfs_gc_workers = 0;
+		pg_atomic_clear_flag(&zfs_state->gc_started);
 	}
 	PG_RETURN_INT32(i);
 }

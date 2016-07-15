@@ -66,6 +66,7 @@
 #include "catalog/objectaccess.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_tablespace.h"
+#include "commands/defrem.h"
 #include "commands/comment.h"
 #include "commands/seclabel.h"
 #include "commands/tablecmds.h"
@@ -93,7 +94,7 @@ char	   *temp_tablespaces = NULL;
 
 
 static void create_tablespace_directories(const char *location,
-							  const Oid tablespaceoid);
+										  const Oid tablespaceoid, bool compressed);
 static bool destroy_tablespace_directories(Oid tablespaceoid, bool redo);
 
 
@@ -224,6 +225,23 @@ TablespaceCreateDbspace(Oid spcNode, Oid dbNode, bool isRedo)
 
 	pfree(dir);
 }
+
+static bool
+getBoolOption(List* options, char const* name, bool defaultValue)
+{
+	ListCell   *cell;
+	foreach(cell, options)
+	{
+		DefElem    *def = (DefElem *) lfirst(cell);
+		if (strcmp(def->defname, name) == 0) 
+		{
+			return defGetBoolean(def);
+		}
+	}
+	return defaultValue;
+}
+
+
 
 /*
  * Create a table space
@@ -358,7 +376,7 @@ CreateTableSpace(CreateTableSpaceStmt *stmt)
 	/* Post creation hook for new tablespace */
 	InvokeObjectPostCreateHook(TableSpaceRelationId, tablespaceoid, 0);
 
-	create_tablespace_directories(location, tablespaceoid);
+	create_tablespace_directories(location, tablespaceoid, getBoolOption(stmt->options, "compression", false));
 
 	/* Record the filesystem change in XLOG */
 	{
@@ -565,7 +583,7 @@ DropTableSpace(DropTableSpaceStmt *stmt)
  *	to the specified directory
  */
 static void
-create_tablespace_directories(const char *location, const Oid tablespaceoid)
+create_tablespace_directories(const char *location, const Oid tablespaceoid, bool compressed)
 {
 	char	   *linkloc;
 	char	   *location_with_version_dir;
@@ -629,9 +647,9 @@ create_tablespace_directories(const char *location, const Oid tablespaceoid)
 							location_with_version_dir)));
 	}
 
-	if (is_tablespace_compressed(tablespaceoid)) 
+	if (compressed)
 	{
-		char* compressionFilePath = psprintf("%s/compression", location_with_version_dir);
+		char* compressionFilePath = psprintf("%s/pg_compression", location_with_version_dir);
 		FILE* comp = fopen(compressionFilePath, "w");
 		elog(LOG, "Create compressed tablespace at %s", location);
 		fputs(zfs_algorithm(), comp);
@@ -1491,7 +1509,7 @@ tblspc_redo(XLogReaderState *record)
 		xl_tblspc_create_rec *xlrec = (xl_tblspc_create_rec *) XLogRecGetData(record);
 		char	   *location = xlrec->ts_path;
 
-		create_tablespace_directories(location, xlrec->ts_id);
+		create_tablespace_directories(location, xlrec->ts_id, is_tablespace_compressed(xlrec->ts_id));
 	}
 	else if (info == XLOG_TBLSPC_DROP)
 	{
