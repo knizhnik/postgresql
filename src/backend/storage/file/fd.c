@@ -1696,12 +1696,15 @@ FileRead(File file, char *buffer, int amount)
 		Assert(amount == BLCKSZ);
 		Assert((VfdCache[file].seekPos & (BLCKSZ-1)) == 0);
 
-		amount = entry->size;
-		if (amount == 0) { 
-			return 0;
+		if (!FileLock(file)) { 
+			return -1;
 		}
 
-		FileLock(file);
+		amount = entry->size;
+		if (amount == 0) { 
+			zfs_unlock_file(map);
+			return 0;
+		}
 
 		seekPos = lseek(VfdCache[file].fd, entry->offs, SEEK_SET);		
 		Assert(seekPos != (off_t) -1);
@@ -1726,7 +1729,7 @@ FileRead(File file, char *buffer, int amount)
 			returnCode = zfs_decompress(buffer, BLCKSZ, compressedBuffer, entry->size);
 			if (returnCode != BLCKSZ) 
 			{
-				elog(LOG, "Decompress error: %d (%s): %d",  file, VfdCache[file].fileName, returnCode);
+				elog(LOG, "Decompress error: %d for file %s compressed size %d", returnCode, VfdCache[file].fileName, entry->size);
 				VfdCache[file].seekPos = FileUnknownPos;
 				returnCode = -1;
 				errno = EIO;
@@ -1833,7 +1836,9 @@ FileWrite(File file, char *buffer, int amount)
 
 		compressedSize = (uint32)zfs_compress(compressedBuffer, sizeof(compressedBuffer), buffer, BLCKSZ);
 
-		FileLock(file);
+		if (!FileLock(file)) { 
+			return -1;
+		}
 
 		if (compressedSize > 0 && compressedSize < ZFS_MIN_COMPRESSED_SIZE(BLCKSZ)) { 
 			Assert((VfdCache[file].seekPos & (BLCKSZ-1)) == 0);
@@ -2062,12 +2067,18 @@ FileTruncate(File file, off_t offset)
 		FileMap* map = VfdCache[file].map;
 		uint32 released = 0;
 		Assert((offset & (BLCKSZ-1)) == 0);
+
+		if (!FileLock(file)) { 
+			return -1;
+		}
+
 		for (i = offset / BLCKSZ; i < RELSEG_SIZE; i++) {  
 			released += map->entries[i].size;
 			map->entries[i].size = 0;
 		}
 		pg_atomic_write_u32(&map->virtSize, offset);
 		pg_atomic_fetch_sub_u32(&map->usedSize, released);
+		zfs_unlock_file(map);
 		returnCode = 0;
 	} else  {
 		returnCode = ftruncate(VfdCache[file].fd, offset);
