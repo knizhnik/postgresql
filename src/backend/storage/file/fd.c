@@ -1704,8 +1704,13 @@ FileRead(File file, char *buffer, int amount)
 		inode = map->inodes[VfdCache[file].seekPos / BLCKSZ];
 		amount = CFS_INODE_SIZE(inode);
 		if (amount == 0) { 
+			uint32 fileSize = pg_atomic_read_u32(&map->virtSize);
+			if (VfdCache[file].seekPos + BLCKSZ <= fileSize) { 
+				amount = BLCKSZ;
+				MemSet(buffer, 0, BLCKSZ);
+			}
 			cfs_unlock_file(map);
-			return 0;
+			return amount;
 		}
 
 		seekPos = lseek(VfdCache[file].fd, CFS_INODE_OFFS(inode), SEEK_SET);		
@@ -1737,7 +1742,7 @@ FileRead(File file, char *buffer, int amount)
 				COMP_TRADITIONAL_CRC32(crc, compressedBuffer, amount);
 				FIN_TRADITIONAL_CRC32(crc);
 				elog(LOG, "Decompress error: %d for file %s position %d compressed size %d crc %x", 
-					 returnCode, VfdCache[file].fileName, seekPos, amount, crc);
+					 returnCode, VfdCache[file].fileName, (uint32)seekPos, amount, crc);
 				VfdCache[file].seekPos = FileUnknownPos;
 				returnCode = -1;
 				errno = EIO;
