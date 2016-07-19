@@ -5322,7 +5322,7 @@ DESCR("pg_controldata init state information as a function");
 DATA(insert OID = 6015 (  zfs_start_gc		   PGNSP PGUID 12 1 0 0 0 f f f f t f i s 1 0 23 "23" _null_ _null_ _null_ _null_ _null_ zfs_start_gc _null_ _null_ _null_ ));
 DESCR("zfs_start_gc start ZFS garbage collection");
 DATA(insert OID = 6016 (  zfs_version		   PGNSP PGUID 12 1 0 0 0 f f f f t f s s 0 0 25 "" _null_ _null_ _null_ _null_ _null_ zfs_version _null_ _null_ _null_ ));
-DESCR("PostgreSQL version string");
+DESCR("ZFS version string");
 
 
 /*
