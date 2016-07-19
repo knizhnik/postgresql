@@ -32,7 +32,7 @@
 #include "portability/instr_time.h"
 #include "postmaster/bgwriter.h"
 #include "storage/fd.h"
-#include "storage/zfs.h"
+#include "storage/cfs.h"
 #include "storage/bufmgr.h"
 #include "storage/relfilenode.h"
 #include "storage/smgr.h"
@@ -239,9 +239,9 @@ static bool md_use_compression(SMgrRelation reln, ForkNumber forknum)
 			if (fgets(algorithm, sizeof algorithm, compressionFile) == NULL) { 
 				elog(ERROR, "Failed to read compression info file %s: %m", compressionFilePath);
 			}
-			if (strcmp(algorithm, zfs_algorithm()) != 0) { 
+			if (strcmp(algorithm, cfs_algorithm()) != 0) { 
 				elog(ERROR, "Tablespace was compressed using %s algorithm, but %s is currently used", 
-					 algorithm, zfs_algorithm());
+					 algorithm, cfs_algorithm());
 			}
 			fclose(compressionFile);
 			ts->compressed = true;

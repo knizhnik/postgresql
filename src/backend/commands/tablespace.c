@@ -74,7 +74,7 @@
 #include "miscadmin.h"
 #include "postmaster/bgwriter.h"
 #include "storage/fd.h"
-#include "storage/zfs.h"
+#include "storage/cfs.h"
 #include "storage/lmgr.h"
 #include "storage/standby.h"
 #include "utils/acl.h"
@@ -652,7 +652,7 @@ create_tablespace_directories(const char *location, const Oid tablespaceoid, boo
 		char* compressionFilePath = psprintf("%s/pg_compression", location_with_version_dir);
 		FILE* comp = fopen(compressionFilePath, "w");
 		elog(LOG, "Create compressed tablespace at %s", location);
-		fputs(zfs_algorithm(), comp);
+		fputs(cfs_algorithm(), comp);
 		fclose(comp);
 		pfree(compressionFilePath);
 	}

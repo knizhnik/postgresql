@@ -1,13 +1,13 @@
 /*-------------------------------------------------------------------------
  *
- * zfs.c
+ * cfs.c
  *	  Compressed file system
  *
  * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
- *	  src/backend/storage/file/zfs.c
+ *	  src/backend/storage/file/cfs.c
  *
  * NOTES:
  *
@@ -39,15 +39,15 @@
 #include "pgstat.h"
 #include "portability/mem.h"
 #include "storage/fd.h"
-#include "storage/zfs.h"
+#include "storage/cfs.h"
 #include "storage/ipc.h"
 #include "utils/guc.h"
 #include "utils/resowner_private.h"
 #include "postmaster/bgworker.h"
 
-int zfs_gc_workers;
-int zfs_gc_threshold;
-int zfs_gc_timeout;
+int cfs_gc_workers;
+int cfs_gc_threshold;
+int cfs_gc_timeout;
 
 
 typedef struct
@@ -55,99 +55,99 @@ typedef struct
 	pg_atomic_flag gc_started;
 	int            n_workers;
 	int            max_iterations;
-} ZfsState;
+} CfsState;
 
 
-static bool zfs_read_file(int fd, void* data, uint32 size);
-static bool zfs_write_file(int fd, void const* data, uint32 size);
-static void zfs_start_background_gc(void);
+static bool cfs_read_file(int fd, void* data, uint32 size);
+static bool cfs_write_file(int fd, void const* data, uint32 size);
+static void cfs_start_background_gc(void);
 
-static ZfsState* zfs_state;
-static bool      zfs_stop;
+static CfsState* cfs_state;
+static bool      cfs_stop;
 
 
-#if ZFS_COMPRESSOR == SNAPPY_COMPRESSOR
+#if CFS_COMPRESSOR == SNAPPY_COMPRESSOR
 
 #include <snappy-c.h>
 
-size_t zfs_compress(void* dst, size_t dst_size, void const* src, size_t src_size)
+size_t cfs_compress(void* dst, size_t dst_size, void const* src, size_t src_size)
 {
     return snappy_compress(src, src_size, dst, &dst_size) == SNAPPY_OK ? dst_size : 0;
 }
 
-size_t zfs_decompress(void* dst, size_t dst_size, void const* src, size_t src_size)
+size_t cfs_decompress(void* dst, size_t dst_size, void const* src, size_t src_size)
 {
     return snappy_uncompress(src, src_size, dst, &dst_size) == SNAPPY_OK ? dst_size : 0;
 }
 
-char const* zfs_algorithm()
+char const* cfs_algorithm()
 {
 	return "snappy";
 }
 
-#elif ZFS_COMPRESSOR == LZFSE_COMPRESSOR
+#elif CFS_COMPRESSOR == LCFSE_COMPRESSOR
 
-#include <lzfse.h>
+#include <lcfse.h>
 
-size_t zfs_compress(void* dst, size_t dst_size, void const* src, size_t src_size)
+size_t cfs_compress(void* dst, size_t dst_size, void const* src, size_t src_size)
 {
-	char* scratch_buf = palloc(lzfse_encode_scratch_size());
-    size_t rc = lzfse_encode_buffer(dst, dst_size, src, src_size, scratch_buf);
+	char* scratch_buf = palloc(lcfse_encode_scratch_size());
+    size_t rc = lcfse_encode_buffer(dst, dst_size, src, src_size, scratch_buf);
 	pfree(scratch_buf);
 	return rc;
 }
 
-size_t zfs_decompress(void* dst, size_t dst_size, void const* src, size_t src_size)
+size_t cfs_decompress(void* dst, size_t dst_size, void const* src, size_t src_size)
 {
-	char* scratch_buf = palloc(lzfse_encode_scratch_size());
-    size_t rc = lzfse_decode_buffer(dst, dst_size, src, src_size, scratch_buf);
+	char* scratch_buf = palloc(lcfse_encode_scratch_size());
+    size_t rc = lcfse_decode_buffer(dst, dst_size, src, src_size, scratch_buf);
 	pfree(scratch_buf);
 	return rc;
 }
 
-char const* zfs_algorithm()
+char const* cfs_algorithm()
 {
-	return "lzfse";
+	return "lcfse";
 }
 
-#elif ZFS_COMPRESSOR == LZ4_COMPRESSOR
+#elif CFS_COMPRESSOR == LZ4_COMPRESSOR
 
 #include <lz4.h>
 
-size_t zfs_compress(void* dst, size_t dst_size, void const* src, size_t src_size)
+size_t cfs_compress(void* dst, size_t dst_size, void const* src, size_t src_size)
 {
     return LZ4_compress(src, dst, src_size);
 }
 
-size_t zfs_decompress(void* dst, size_t dst_size, void const* src, size_t src_size)
+size_t cfs_decompress(void* dst, size_t dst_size, void const* src, size_t src_size)
 {
     return LZ4_decompress_safe(src, dst, src_size, dst_size);
 }
 
-char const* zfs_algorithm()
+char const* cfs_algorithm()
 {
 	return "lz4";
 }
 
-#elif ZFS_COMPRESSOR == ZLIB_COMPRESSOR
+#elif CFS_COMPRESSOR == ZLIB_COMPRESSOR
 
 #include <zlib.h>
 
-size_t zfs_compress(void* dst, size_t dst_size, void const* src, size_t src_size)
+size_t cfs_compress(void* dst, size_t dst_size, void const* src, size_t src_size)
 {
     uLongf compressed_size = dst_size;
     int rc = compress2(dst, &compressed_size, src, src_size, Z_BEST_SPEED);
 	return rc == Z_OK ? compressed_size : rc;
 }
 
-size_t zfs_decompress(void* dst, size_t dst_size, void const* src, size_t src_size)
+size_t cfs_decompress(void* dst, size_t dst_size, void const* src, size_t src_size)
 {
     uLongf dest_len = dst_size;
     int rc = uncompress(dst, &dest_len, src, src_size);
 	return rc == Z_OK ? dest_len : rc;
 }
 
-char const* zfs_algorithm()
+char const* cfs_algorithm()
 {
 	return "zlib";
 }
@@ -156,17 +156,17 @@ char const* zfs_algorithm()
 
 #include <common/pg_lzcompress.h>
 
-size_t zfs_compress(void* dst, size_t dst_size, void const* src, size_t src_size)
+size_t cfs_compress(void* dst, size_t dst_size, void const* src, size_t src_size)
 {
 	return pglz_compress(src, src_size, dst, PGLZ_strategy_always);
 }
 
-size_t zfs_decompress(void* dst, size_t dst_size, void const* src, size_t src_size)
+size_t cfs_decompress(void* dst, size_t dst_size, void const* src, size_t src_size)
 {
 	return pglz_decompress(src, src_size, dst, dst_size);
 }
 
-char const* zfs_algorithm()
+char const* cfs_algorithm()
 {
 	return "pglz";
 }
@@ -175,35 +175,35 @@ char const* zfs_algorithm()
 
 
 
-void zfs_initialize()
+void cfs_initialize()
 {
-	zfs_state = (ZfsState*)ShmemAlloc(sizeof(ZfsState));
-	pg_atomic_init_flag(&zfs_state->gc_started);
-	elog(LOG, "Start ZFS version %s compression algorithm %s", 
-		 ZFS_VERSION, zfs_algorithm());
+	cfs_state = (CfsState*)ShmemAlloc(sizeof(CfsState));
+	pg_atomic_init_flag(&cfs_state->gc_started);
+	elog(LOG, "Start CFS version %s compression algorithm %s", 
+		 CFS_VERSION, cfs_algorithm());
 }
 
-int zfs_msync(FileMap* map)
+int cfs_msync(FileMap* map)
 {
 	return msync(map, sizeof(FileMap), MS_SYNC);
 }
 
-FileMap* zfs_mmap(int md)
+FileMap* cfs_mmap(int md)
 {
 	return (FileMap*)mmap(NULL, sizeof(FileMap), PROT_WRITE | PROT_READ, MAP_SHARED, md, 0);
 }
 
-int zfs_munmap(FileMap* map)
+int cfs_munmap(FileMap* map)
 {
 	return munmap(map, sizeof(FileMap));
 }
 
-void zfs_lock_file(FileMap* map, char const* file_path)
+void cfs_lock_file(FileMap* map, char const* file_path)
 {
-	long delay = ZFS_LOCK_MIN_TIMEOUT;
+	long delay = CFS_LOCK_MIN_TIMEOUT;
 	while (true) { 
 		uint64 count = pg_atomic_fetch_add_u32(&map->lock, 1);
-		if (count < ZFS_GC_LOCK) {
+		if (count < CFS_GC_LOCK) {
 			break;
 		} 
 		if (InRecovery) { 
@@ -217,7 +217,7 @@ void zfs_lock_file(FileMap* map, char const* file_path)
 				int md2 = open(map_bck_path, O_RDWR|PG_BINARY, 0);
 				if (md2 >= 0) { 
 					/* Recover map */
-					if (!zfs_read_file(md2, map, sizeof(FileMap))) { 
+					if (!cfs_read_file(md2, map, sizeof(FileMap))) { 
 						elog(LOG, "Failed to read file %s: %m", map_bck_path);
 					}
 					close(md2);
@@ -235,20 +235,20 @@ void zfs_lock_file(FileMap* map, char const* file_path)
 		}
 		pg_atomic_fetch_sub_u32(&map->lock, 1);
 		pg_usleep(delay);
-		if (delay < ZFS_LOCK_MAX_TIMEOUT) { 
+		if (delay < CFS_LOCK_MAX_TIMEOUT) { 
 			delay *= 2;
 		}
 	}
-	if (IsUnderPostmaster && zfs_gc_workers != 0 && pg_atomic_test_set_flag(&zfs_state->gc_started))
+	if (IsUnderPostmaster && cfs_gc_workers != 0 && pg_atomic_test_set_flag(&cfs_state->gc_started))
 	{
-		zfs_start_background_gc();
+		cfs_start_background_gc();
 	}
 }
 
 /*
  * Protects file from GC
  */
-void zfs_unlock_file(FileMap* map)
+void cfs_unlock_file(FileMap* map)
 {
 	pg_atomic_fetch_sub_u32(&map->lock, 1);
 }
@@ -256,7 +256,7 @@ void zfs_unlock_file(FileMap* map)
 /*
  * Get position for storing uodated page
  */
-uint32 zfs_alloc_page(FileMap* map, uint32 oldSize, uint32 newSize)
+uint32 cfs_alloc_page(FileMap* map, uint32 oldSize, uint32 newSize)
 {
 	pg_atomic_fetch_add_u32(&map->usedSize, newSize - oldSize);
 	return pg_atomic_fetch_add_u32(&map->physSize, newSize);
@@ -265,7 +265,7 @@ uint32 zfs_alloc_page(FileMap* map, uint32 oldSize, uint32 newSize)
 /*
  * Update logical file size
  */
-void zfs_extend(FileMap* map, uint32 newSize)
+void cfs_extend(FileMap* map, uint32 newSize)
 {
 	uint32 oldSize = pg_atomic_read_u32(&map->virtSize);
 	while (newSize > oldSize && !pg_atomic_compare_exchange_u32(&map->virtSize, &oldSize, newSize));
@@ -274,7 +274,7 @@ void zfs_extend(FileMap* map, uint32 newSize)
 /*
  * Safe read of file
  */
-static bool zfs_read_file(int fd, void* data, uint32 size)
+static bool cfs_read_file(int fd, void* data, uint32 size)
 {
 	uint32 offs = 0;
 	do { 
@@ -294,7 +294,7 @@ static bool zfs_read_file(int fd, void* data, uint32 size)
 /*
  * Safe write of file
  */
-static bool zfs_write_file(int fd, void const* data, uint32 size)
+static bool cfs_write_file(int fd, void const* data, uint32 size)
 {
 	uint32 offs = 0;
 	do { 
@@ -314,10 +314,10 @@ static bool zfs_write_file(int fd, void const* data, uint32 size)
 /*
  * Sort pages by offset to improve access locality
  */
-static int zfs_cmp_page_offs(void const* p1, void const* p2) 
+static int cfs_cmp_page_offs(void const* p1, void const* p2) 
 {
-	uint32 o1 = ZFS_INODE_OFFS(**(inode_t**)p1);
-	uint32 o2 = ZFS_INODE_OFFS(**(inode_t**)p2);
+	uint32 o1 = CFS_INODE_OFFS(**(inode_t**)p1);
+	uint32 o2 = CFS_INODE_OFFS(**(inode_t**)p2);
 	return o1 < o2 ? -1 : o1 == o2 ? 0 : 1;
 }
 
@@ -325,7 +325,7 @@ static int zfs_cmp_page_offs(void const* p1, void const* p2)
  * Perform garbage collection (if required) of file
  * @param map_path path to file map file (*.map). 
  */
-static bool zfs_gc_file(char* map_path)
+static bool cfs_gc_file(char* map_path)
 {
 	int md = open(map_path, O_RDWR|PG_BINARY, 0);
 	FileMap* map;
@@ -340,7 +340,7 @@ static bool zfs_gc_file(char* map_path)
 		elog(LOG, "Failed to open map file %s: %m", map_path);
 		return false;
 	}
-	map = zfs_mmap(md);
+	map = cfs_mmap(md);
 	if (map == MAP_FAILED) {
 		elog(LOG, "Failed to map file %s: %m", map_path);
 		close(md);
@@ -350,9 +350,9 @@ static bool zfs_gc_file(char* map_path)
 	physSize = pg_atomic_read_u32(&map->physSize);
 	virtSize = pg_atomic_read_u32(&map->virtSize);
 		
-	if ((physSize - usedSize)*100 > physSize*zfs_gc_threshold) /* do we need to perform defragmentation? */
+	if ((physSize - usedSize)*100 > physSize*cfs_gc_threshold) /* do we need to perform defragmentation? */
 	{ 
-		long delay = ZFS_LOCK_MIN_TIMEOUT;		
+		long delay = CFS_LOCK_MIN_TIMEOUT;		
 		char* file_path = (char*)palloc(suf+1);
 		char* map_bck_path = (char*)palloc(suf+10);
 		char* file_bck_path = (char*)palloc(suf+5);
@@ -370,10 +370,10 @@ static bool zfs_gc_file(char* map_path)
 
 		while (true) { 
 			uint32 access_count = 0;
-			if (pg_atomic_compare_exchange_u32(&map->lock, &access_count, ZFS_GC_LOCK)) {				
+			if (pg_atomic_compare_exchange_u32(&map->lock, &access_count, CFS_GC_LOCK)) {				
 				break;
 			}
-			if (access_count >= ZFS_GC_LOCK) { 
+			if (access_count >= CFS_GC_LOCK) { 
 				/* Uhhh... looks like last GC was interrupted.
 				 * Try to recover file
 				 */
@@ -382,7 +382,7 @@ static bool zfs_gc_file(char* map_path)
 					md2 = open(map_bck_path, O_RDWR|PG_BINARY, 0);
 					if (md2 >= 0) { 
 						/* Recover map */
-						if (!zfs_read_file(md2, newMap, sizeof(FileMap))) { 
+						if (!cfs_read_file(md2, newMap, sizeof(FileMap))) { 
 							elog(LOG, "Failed to read file %s: %m", map_bck_path);
 							goto Cleanup;
 						}
@@ -402,7 +402,7 @@ static bool zfs_gc_file(char* map_path)
 				}
 			}
 			pg_usleep(delay);
-			if (delay < ZFS_LOCK_MAX_TIMEOUT) { 
+			if (delay < CFS_LOCK_MAX_TIMEOUT) { 
 				delay *= 2;
 			}
 		}				 			
@@ -415,7 +415,7 @@ static bool zfs_gc_file(char* map_path)
 		    inodes[i] = &newMap->inodes[i];
 		}
 		/* sort inodes by offset to improve read locality */
-		qsort(inodes, n_pages, sizeof(inode_t*), zfs_cmp_page_offs);
+		qsort(inodes, n_pages, sizeof(inode_t*), cfs_cmp_page_offs);
 		
 		fd = open(file_path, O_RDWR|PG_BINARY, 0);
 		if (fd < 0) { 
@@ -428,27 +428,27 @@ static bool zfs_gc_file(char* map_path)
 		}
 		
 		for (i = 0; i < n_pages; i++) { 
-			int size = ZFS_INODE_SIZE(*inodes[i]);
+			int size = CFS_INODE_SIZE(*inodes[i]);
 			if (size != 0) { 
 				char block[BLCKSZ];
 				off_t rc PG_USED_FOR_ASSERTS_ONLY;
-				uint32 offs = ZFS_INODE_OFFS(*inodes[i]);
+				uint32 offs = CFS_INODE_OFFS(*inodes[i]);
 				Assert(size <= BLCKSZ);	
 				rc = lseek(fd, offs, SEEK_SET);
 				Assert(rc == offs);
 				
-				if (!zfs_read_file(fd, block, size)) { 
+				if (!cfs_read_file(fd, block, size)) { 
 					elog(LOG, "Failed to read file %s: %m", file_path);
 					goto Cleanup;
 				}
 				
-				if (!zfs_write_file(fd2, block, size)) { 
+				if (!cfs_write_file(fd2, block, size)) { 
 					elog(LOG, "Failed to write file %s: %m", file_bck_path);
 					goto Cleanup;
 				}
 				offs = newSize;
 				newSize += size;
-				*inodes[i] = ZFS_INODE(size, offs);
+				*inodes[i] = CFS_INODE(size, offs);
 			}
 		}
 		pg_atomic_write_u32(&map->usedSize, newSize);
@@ -471,7 +471,7 @@ static bool zfs_gc_file(char* map_path)
 		fd2 = -1;
 
 		/* Persist copy of map file */
-		if (!zfs_write_file(md2, &newMap, sizeof(newMap))) { 
+		if (!cfs_write_file(md2, &newMap, sizeof(newMap))) { 
 			elog(LOG, "Failed to write file %s: %m", map_bck_path);
 			goto Cleanup;
 		}
@@ -485,8 +485,8 @@ static bool zfs_gc_file(char* map_path)
 		}
 		md2 = -1;
 
-		/* Persist map with ZFS_GC_LOCK set: in case of crash we will know that map may be changed by GC */
-		if (zfs_msync(map) < 0) {
+		/* Persist map with CFS_GC_LOCK set: in case of crash we will know that map may be changed by GC */
+		if (cfs_msync(map) < 0) {
 			elog(LOG, "Failed to sync map %s: %m", map_path);
 			goto Cleanup;
 		}
@@ -514,7 +514,7 @@ static bool zfs_gc_file(char* map_path)
 		map->generation += 1; /* force all backends to reopen the file */
 		
 		/* Before removing backup files and releasing locks we need to flush updated map file */
-		if (zfs_msync(map) < 0) {
+		if (cfs_msync(map) < 0) {
 			elog(LOG, "Failed to sync map %s: %m", map_path);
 			goto Cleanup;
 		}
@@ -533,7 +533,7 @@ static bool zfs_gc_file(char* map_path)
 		} else { 
 			remove_backups = true; /* now backups are not need any more */
 		}
-		pg_atomic_fetch_sub_u32(&map->lock, ZFS_GC_LOCK); /* release lock */
+		pg_atomic_fetch_sub_u32(&map->lock, CFS_GC_LOCK); /* release lock */
 
 		/* remove map backup file */
 		if (remove_backups && unlink(map_bck_path)) {
@@ -549,12 +549,12 @@ static bool zfs_gc_file(char* map_path)
 		pfree(map_bck_path);
 		pfree(inodes);
 		pfree(newMap);
-	} else if (zfs_state->max_iterations == 1) { 
+	} else if (cfs_state->max_iterations == 1) { 
 		elog(LOG, "%d: file %.*s: physical size %d, logical size %d, used %d, compression ratio %f",
 			 MyProcPid, suf, map_path, physSize, virtSize, usedSize, (double)virtSize/physSize);
 	}
 	
-	if (zfs_munmap(map) < 0) { 
+	if (cfs_munmap(map) < 0) { 
 		elog(LOG, "Failed to unmap file %s: %m", map_path);
 		succeed = false;
 	}
@@ -565,7 +565,7 @@ static bool zfs_gc_file(char* map_path)
 	return succeed;
 }
 
-static bool zfs_gc_directory(int worker_id, char const* path)
+static bool cfs_gc_directory(int worker_id, char const* path)
 {
 	DIR* dir = AllocateDir(path);
 	bool success = true;
@@ -575,7 +575,7 @@ static bool zfs_gc_directory(int worker_id, char const* path)
 		char file_path[MAXPGPATH];
 		int len;
 
-		while ((entry = ReadDir(dir, path)) != NULL && !zfs_stop)
+		while ((entry = ReadDir(dir, path)) != NULL && !cfs_stop)
 		{
 			if (strcmp(entry->d_name, ".") == 0 ||
 				strcmp(entry->d_name, "..") == 0)
@@ -586,13 +586,13 @@ static bool zfs_gc_directory(int worker_id, char const* path)
 			if (len > 4 && 
 				strcmp(file_path + len - 4, ".map") == 0) 
 			{ 
-				if (entry->d_ino % zfs_state->n_workers == worker_id && !zfs_gc_file(file_path))
+				if (entry->d_ino % cfs_state->n_workers == worker_id && !cfs_gc_file(file_path))
 				{ 
 					success = false;
 					break;
 				}
 			} else { 
-				if (!zfs_gc_directory(worker_id, file_path)) 
+				if (!cfs_gc_directory(worker_id, file_path)) 
 				{ 
 					success = false;
 					break;
@@ -604,87 +604,87 @@ static bool zfs_gc_directory(int worker_id, char const* path)
 	return success;
 }
 
-static void zfs_cancel(int sig)
+static void cfs_cancel(int sig)
 {
-	zfs_stop = true;
+	cfs_stop = true;
 }
 	  
-static bool zfs_scan_tablespace(int worker_id)
+static bool cfs_scan_tablespace(int worker_id)
 {
-	return zfs_gc_directory(worker_id, "pg_tblspc");
+	return cfs_gc_directory(worker_id, "pg_tblspc");
 }
 
 
-static void zfs_bgworker_main(Datum arg)
+static void cfs_bgworker_main(Datum arg)
 {
 	int worker_id = DatumGetInt32(arg);
     sigset_t sset;
 
-	signal(SIGINT, zfs_cancel);
-    signal(SIGQUIT, zfs_cancel);
-    signal(SIGTERM, zfs_cancel);
+	signal(SIGINT, cfs_cancel);
+    signal(SIGQUIT, cfs_cancel);
+    signal(SIGTERM, cfs_cancel);
     sigfillset(&sset);
     sigprocmask(SIG_UNBLOCK, &sset, NULL);
 
     /* We're now ready to receive signals */
     BackgroundWorkerUnblockSignals();
 
-	while (zfs_scan_tablespace(worker_id) && !zfs_stop && --zfs_state->max_iterations >= 0) { 
-		pg_usleep(zfs_gc_timeout*USECS_PER_SEC);
+	while (cfs_scan_tablespace(worker_id) && !cfs_stop && --cfs_state->max_iterations >= 0) { 
+		pg_usleep(cfs_gc_timeout*USECS_PER_SEC);
 	}
 }
 
-void zfs_start_background_gc()
+void cfs_start_background_gc()
 {
 	int i;
-	zfs_state->max_iterations = INT_MAX;
-	zfs_state->n_workers = zfs_gc_workers;
+	cfs_state->max_iterations = INT_MAX;
+	cfs_state->n_workers = cfs_gc_workers;
 
-	for (i = 0; i < zfs_gc_workers; i++) {
+	for (i = 0; i < cfs_gc_workers; i++) {
 		BackgroundWorker worker;	
 		BackgroundWorkerHandle* handle;
 		MemSet(&worker, 0, sizeof(worker));
-		sprintf(worker.bgw_name, "zfs-worker-%d", i);
+		sprintf(worker.bgw_name, "cfs-worker-%d", i);
 		worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
 		worker.bgw_start_time = BgWorkerStart_ConsistentState;
 		worker.bgw_restart_time = 1;
-		worker.bgw_main = zfs_bgworker_main;
+		worker.bgw_main = cfs_bgworker_main;
 		worker.bgw_main_arg = Int32GetDatum(i);
 		if (!RegisterDynamicBackgroundWorker(&worker, &handle)) { 
 			break;
 		}
 	}
-	elog(LOG, "Start %d background ZFS background workers", i);
+	elog(LOG, "Start %d background CFS background workers", i);
 }
 
 PG_MODULE_MAGIC;
 
-PG_FUNCTION_INFO_V1(zfs_start_gc);
-PG_FUNCTION_INFO_V1(zfs_version);
+PG_FUNCTION_INFO_V1(cfs_start_gc);
+PG_FUNCTION_INFO_V1(cfs_version);
 
-Datum zfs_start_gc(PG_FUNCTION_ARGS)
+Datum cfs_start_gc(PG_FUNCTION_ARGS)
 {
 	int i = 0;
 
-	if (zfs_gc_workers == 0 && pg_atomic_test_set_flag(&zfs_state->gc_started)) 
+	if (cfs_gc_workers == 0 && pg_atomic_test_set_flag(&cfs_state->gc_started)) 
 	{
 		int j;
 		BackgroundWorkerHandle** handles;
 
-		zfs_stop = true; /* do just one iteration */	   
+		cfs_stop = true; /* do just one iteration */	   
 
-		zfs_state->max_iterations = 1;
-		zfs_state->n_workers = PG_GETARG_INT32(0);
-		handles = (BackgroundWorkerHandle**)palloc(zfs_state->n_workers*sizeof(BackgroundWorkerHandle*));		
+		cfs_state->max_iterations = 1;
+		cfs_state->n_workers = PG_GETARG_INT32(0);
+		handles = (BackgroundWorkerHandle**)palloc(cfs_state->n_workers*sizeof(BackgroundWorkerHandle*));		
 
-		for (i = 0; i < zfs_state->n_workers; i++) {
+		for (i = 0; i < cfs_state->n_workers; i++) {
 			BackgroundWorker worker;
 			MemSet(&worker, 0, sizeof(worker));
-			sprintf(worker.bgw_name, "zfs-worker-%d", i);
+			sprintf(worker.bgw_name, "cfs-worker-%d", i);
 			worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
 			worker.bgw_start_time = BgWorkerStart_ConsistentState;
 			worker.bgw_restart_time = 1;
-			worker.bgw_main = zfs_bgworker_main;
+			worker.bgw_main = cfs_bgworker_main;
 			worker.bgw_main_arg = Int32GetDatum(i);
 			if (!RegisterDynamicBackgroundWorker(&worker, &handles[i])) { 
 				break;
@@ -694,12 +694,12 @@ Datum zfs_start_gc(PG_FUNCTION_ARGS)
 			WaitForBackgroundWorkerShutdown(handles[j]);
 		}
 		pfree(handles);
-		pg_atomic_clear_flag(&zfs_state->gc_started);
+		pg_atomic_clear_flag(&cfs_state->gc_started);
 	}
 	PG_RETURN_INT32(i);
 }
 
-Datum zfs_version(PG_FUNCTION_ARGS)
+Datum cfs_version(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_CSTRING(psprintf("%s-%s", ZFS_VERSION, zfs_algorithm()));
+	PG_RETURN_CSTRING(psprintf("%s-%s", CFS_VERSION, cfs_algorithm()));
 }

@@ -81,10 +81,11 @@
 #include "pgstat.h"
 #include "portability/mem.h"
 #include "storage/fd.h"
-#include "storage/zfs.h"
+#include "storage/cfs.h"
 #include "storage/ipc.h"
 #include "utils/guc.h"
 #include "utils/resowner_private.h"
+#include "utils/pg_crc.h"
 
 /* Define PG_FLUSH_DATA_WORKS if we have an implementation for pg_flush_data */
 #if defined(HAVE_SYNC_FILE_RANGE)
@@ -978,7 +979,7 @@ LruDelete(File file)
 
 	if (vfdP->fileFlags & PG_COMPRESSION) 
 	{ 
-		if (zfs_munmap(vfdP->map))
+		if (cfs_munmap(vfdP->map))
 			elog(ERROR, "could not unmap file \"%s.map\": %m", vfdP->fileName);
 		
 		if (close(vfdP->md))
@@ -1065,7 +1066,7 @@ LruInsert(File file)
 				vfdP->fd = VFD_CLOSED;
 				return -1;
 			}
-			vfdP->map = zfs_mmap(vfdP->md);
+			vfdP->map = cfs_mmap(vfdP->md);
 			if (vfdP->map == MAP_FAILED) 
 			{
 				elog(LOG, "RE_MAP FAILED: %d", errno);
@@ -1317,7 +1318,7 @@ PathNameOpenFile(FileName fileName, int fileFlags, int fileMode)
 		{
 			elog(LOG, "OPEN MAP ftruncate FAILED: %d", errno);
 		}
-		vfdP->map = zfs_mmap(vfdP->md);
+		vfdP->map = cfs_mmap(vfdP->md);
 		if (vfdP->map == MAP_FAILED) 
 		{
 			save_errno = errno;
@@ -1506,7 +1507,7 @@ FileClose(File file)
 			elog(ERROR, "could not close file \"%s\": %m", vfdP->fileName);
 
 		if (vfdP->fileFlags & PG_COMPRESSION) { 
-			if (zfs_munmap(vfdP->map))
+			if (cfs_munmap(vfdP->map))
 				elog(ERROR, "could not unmap file \"%s.map\": %m", vfdP->fileName);
 			
 			if (close(vfdP->md))
@@ -1657,7 +1658,7 @@ FileLock(File file)
 {
 	Vfd *vfdP = &VfdCache[file];
 
-	zfs_lock_file(vfdP->map, vfdP->fileName); /* protect file from GC */
+	cfs_lock_file(vfdP->map, vfdP->fileName); /* protect file from GC */
 	
 	if (vfdP->generation != vfdP->map->generation) 
 	{
@@ -1701,14 +1702,14 @@ FileRead(File file, char *buffer, int amount)
 		}
 
 		inode = map->inodes[VfdCache[file].seekPos / BLCKSZ];
-		amount = ZFS_INODE_SIZE(inode);
+		amount = CFS_INODE_SIZE(inode);
 		if (amount == 0) { 
-			zfs_unlock_file(map);
+			cfs_unlock_file(map);
 			return 0;
 		}
 
-		seekPos = lseek(VfdCache[file].fd, ZFS_INODE_OFFS(inode), SEEK_SET);		
-		Assert(seekPos != (off_t) -1);
+		seekPos = lseek(VfdCache[file].fd, CFS_INODE_OFFS(inode), SEEK_SET);		
+		Assert(seekPos == (off_t)CFS_INODE_OFFS(inode));
 
 		if (amount < BLCKSZ) { 
 			char compressedBuffer[BLCKSZ];
@@ -1722,23 +1723,28 @@ FileRead(File file, char *buffer, int amount)
 				} else { 
 					if (errno != EINTR) { 
 						elog(LOG, "Failed to read from compressed file: %d (%s): %m",  file, VfdCache[file].fileName);
-						zfs_unlock_file(map);
+						cfs_unlock_file(map);
 						return returnCode;
 					}
 				}
 			} while (size != 0);
 
-			returnCode = zfs_decompress(buffer, BLCKSZ, compressedBuffer, amount);
+			returnCode = cfs_decompress(buffer, BLCKSZ, compressedBuffer, amount);
 			if (returnCode != BLCKSZ) 
 			{
-				elog(LOG, "Decompress error: %d for file %s compressed size %d", returnCode, VfdCache[file].fileName, amount);
+				pg_crc32 crc;
+				INIT_TRADITIONAL_CRC32(crc);
+				COMP_TRADITIONAL_CRC32(crc, compressedBuffer, amount);
+				FIN_TRADITIONAL_CRC32(crc);
+				elog(LOG, "Decompress error: %d for file %s position %d compressed size %d crc %x", 
+					 returnCode, VfdCache[file].fileName, seekPos, amount, crc);
 				VfdCache[file].seekPos = FileUnknownPos;
 				returnCode = -1;
 				errno = EIO;
 			} else {
 				VfdCache[file].seekPos += BLCKSZ;
 			}
-			zfs_unlock_file(map);
+			cfs_unlock_file(map);
 			return returnCode;
 		}
 	}
@@ -1780,7 +1786,7 @@ FileRead(File file, char *buffer, int amount)
 	}
 	if (VfdCache[file].fileFlags & PG_COMPRESSION) 
 	{
-		zfs_unlock_file(VfdCache[file].map);
+		cfs_unlock_file(VfdCache[file].map);
 	}
 	return returnCode;
 }
@@ -1789,7 +1795,7 @@ int
 FileWrite(File file, char *buffer, int amount)
 {
 	int  returnCode;	
-	char compressedBuffer[ZFS_MAX_COMPRESSED_SIZE(BLCKSZ)];
+	char compressedBuffer[CFS_MAX_COMPRESSED_SIZE(BLCKSZ)];
 	inode_t inode = 0;
 
 	Assert(FileIsValid(file));
@@ -1836,31 +1842,31 @@ FileWrite(File file, char *buffer, int amount)
 		uint32   compressedSize;
 		Assert(amount == BLCKSZ);
 
-		compressedSize = (uint32)zfs_compress(compressedBuffer, sizeof(compressedBuffer), buffer, BLCKSZ);
+		compressedSize = (uint32)cfs_compress(compressedBuffer, sizeof(compressedBuffer), buffer, BLCKSZ);
 
 		if (!FileLock(file)) { 
 			return -1;
 		}
 		inode = map->inodes[VfdCache[file].seekPos / BLCKSZ];
-		if (compressedSize > 0 && compressedSize < ZFS_MIN_COMPRESSED_SIZE(BLCKSZ)) { 
+		if (compressedSize > 0 && compressedSize < CFS_MIN_COMPRESSED_SIZE(BLCKSZ)) { 
 			Assert((VfdCache[file].seekPos & (BLCKSZ-1)) == 0);
 			/* Do not check that new image of compressed page fits into 
 			 * old space because we want to write all updated pages sequentially */
-			pos = zfs_alloc_page(map, ZFS_INODE_SIZE(inode), compressedSize);						
-			inode = ZFS_INODE(compressedSize, pos);
+			pos = cfs_alloc_page(map, CFS_INODE_SIZE(inode), compressedSize);						
+			inode = CFS_INODE(compressedSize, pos);
 			buffer = compressedBuffer;
 			amount = compressedSize;
 		} else { 
-			if (ZFS_INODE_SIZE(inode) != BLCKSZ) { 
-				pos = zfs_alloc_page(map, ZFS_INODE_SIZE(inode), BLCKSZ);						
-				inode = ZFS_INODE(BLCKSZ, pos);
+			if (CFS_INODE_SIZE(inode) != BLCKSZ) { 
+				pos = cfs_alloc_page(map, CFS_INODE_SIZE(inode), BLCKSZ);						
+				inode = CFS_INODE(BLCKSZ, pos);
 			} else { 
 				/* For uncompressed pages we use update  in-place. It contradicts with sequential write policy described above. */
-				pos = ZFS_INODE_OFFS(inode);
+				pos = CFS_INODE_OFFS(inode);
 			}
 		}
 		seekPos = lseek(VfdCache[file].fd, pos, SEEK_SET);
-		Assert(seekPos != (off_t) -1);
+		Assert(seekPos == (off_t)pos);
 	}
 retry:
 	errno = 0;
@@ -1877,7 +1883,7 @@ retry:
 			{				
 				VfdCache[file].map->inodes[VfdCache[file].seekPos / BLCKSZ] = inode;
 				VfdCache[file].seekPos += BLCKSZ;
-				zfs_extend(VfdCache[file].map, VfdCache[file].seekPos);
+				cfs_extend(VfdCache[file].map, VfdCache[file].seekPos);
 				returnCode = BLCKSZ;
 			} else { 
 				elog(LOG, "Write failed with code %d: %m", returnCode);
@@ -1929,7 +1935,7 @@ retry:
 	}
 	if (VfdCache[file].fileFlags & PG_COMPRESSION) 
 	{
-		zfs_unlock_file(VfdCache[file].map);
+		cfs_unlock_file(VfdCache[file].map);
 	}
 	return returnCode;
 }
@@ -1951,7 +1957,7 @@ FileSync(File file)
 	returnCode = pg_fsync(VfdCache[file].fd);
 	if (returnCode == 0 && (VfdCache[file].fileFlags & PG_COMPRESSION)) 
 	{
-		returnCode = zfs_msync(VfdCache[file].map);
+		returnCode = cfs_msync(VfdCache[file].map);
 		if (returnCode == 0)
 		{		
 			returnCode = pg_fsync(VfdCache[file].md);
@@ -2074,12 +2080,12 @@ FileTruncate(File file, off_t offset)
 		}
 
 		for (i = offset / BLCKSZ; i < RELSEG_SIZE; i++) {  
-			released += ZFS_INODE_SIZE(map->inodes[i]);
+			released += CFS_INODE_SIZE(map->inodes[i]);
 			map->inodes[i] = 0;
 		}
 		pg_atomic_write_u32(&map->virtSize, offset);
 		pg_atomic_fetch_sub_u32(&map->usedSize, released);
-		zfs_unlock_file(map);
+		cfs_unlock_file(map);
 		returnCode = 0;
 	} else  {
 		returnCode = ftruncate(VfdCache[file].fd, offset);
