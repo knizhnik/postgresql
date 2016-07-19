@@ -1707,6 +1707,7 @@ FileRead(File file, char *buffer, int amount)
 			uint32 fileSize = pg_atomic_read_u32(&map->virtSize);
 			if (VfdCache[file].seekPos + BLCKSZ <= fileSize) { 
 				amount = BLCKSZ;
+				VfdCache[file].seekPos += BLCKSZ;
 				MemSet(buffer, 0, BLCKSZ);
 			}
 			cfs_unlock_file(map);
