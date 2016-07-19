@@ -179,6 +179,8 @@ void zfs_initialize()
 {
 	zfs_state = (ZfsState*)ShmemAlloc(sizeof(ZfsState));
 	pg_atomic_init_flag(&zfs_state->gc_started);
+	elog(LOG, "Start ZFS version %s compression algorithm %s", 
+		 ZFS_VERSION, zfs_algorithm());
 }
 
 int zfs_msync(FileMap* map)
@@ -699,5 +701,5 @@ Datum zfs_start_gc(PG_FUNCTION_ARGS)
 
 Datum zfs_version(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_CSTRING(psprintf("0.03-%s", zfs_algorithm()));
+	PG_RETURN_CSTRING(psprintf("%s-%s", ZFS_VERSION, zfs_algorithm()));
 }
