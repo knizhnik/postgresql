@@ -136,13 +136,15 @@ char const* zfs_algorithm()
 size_t zfs_compress(void* dst, size_t dst_size, void const* src, size_t src_size)
 {
     uLongf compressed_size = dst_size;
-    return compress2(dst, &compressed_size, src, src_size, Z_BEST_SPEED) == Z_OK ? compressed_size : 0;
+    int rc = compress2(dst, &compressed_size, src, src_size, Z_BEST_SPEED);
+	return rc == Z_OK ? compressed_size : rc;
 }
 
 size_t zfs_decompress(void* dst, size_t dst_size, void const* src, size_t src_size)
 {
     uLongf dest_len = dst_size;
-    return uncompress(dst, &dest_len, src, src_size) == Z_OK ? dest_len : 0;
+    int rc = uncompress(dst, &dest_len, src, src_size);
+	return rc == Z_OK ? dest_len : rc;
 }
 
 char const* zfs_algorithm()
@@ -312,9 +314,9 @@ static bool zfs_write_file(int fd, void const* data, uint32 size)
  */
 static int zfs_cmp_page_offs(void const* p1, void const* p2) 
 {
-	FileMapEntry* e1 = *(FileMapEntry**)p1;
-	FileMapEntry* e2 = *(FileMapEntry**)p2;
-	return e1->offs < e2->offs ? -1 : e1->offs == e2->offs ? 0 : 1;
+	uint32 o1 = ZFS_INODE_OFFS(**(inode_t**)p1);
+	uint32 o2 = ZFS_INODE_OFFS(**(inode_t**)p2);
+	return o1 < o2 ? -1 : o1 == o2 ? 0 : 1;
 }
 
 /*
@@ -354,7 +356,7 @@ static bool zfs_gc_file(char* map_path)
 		char* file_bck_path = (char*)palloc(suf+5);
 		FileMap* newMap = (FileMap*)palloc0(sizeof(FileMap));
 		uint32 newSize = 0;
-		FileMapEntry** entries = (FileMapEntry**)palloc(RELSEG_SIZE*sizeof(FileMapEntry*));
+		inode_t** inodes = (inode_t**)palloc(RELSEG_SIZE*sizeof(inode_t*));
 		bool remove_backups = true;
 		int n_pages = virtSize / BLCKSZ;
 		int i;
@@ -407,11 +409,11 @@ static bool zfs_gc_file(char* map_path)
 			goto Cleanup;
 		}
 		for (i = 0; i < n_pages; i++) { 
-			newMap->entries[i] = map->entries[i];
-			entries[i] = &newMap->entries[i];
+			newMap->inodes[i] = map->inodes[i];
+		    inodes[i] = &newMap->inodes[i];
 		}
-		/* sort entries by offset to improve read locality */
-		qsort(entries, n_pages, sizeof(FileMapEntry*), zfs_cmp_page_offs);
+		/* sort inodes by offset to improve read locality */
+		qsort(inodes, n_pages, sizeof(inode_t*), zfs_cmp_page_offs);
 		
 		fd = open(file_path, O_RDWR|PG_BINARY, 0);
 		if (fd < 0) { 
@@ -424,13 +426,14 @@ static bool zfs_gc_file(char* map_path)
 		}
 		
 		for (i = 0; i < n_pages; i++) { 
-			if (entries[i]->size != 0) { 
+			int size = ZFS_INODE_SIZE(*inodes[i]);
+			if (size != 0) { 
 				char block[BLCKSZ];
-				int size = entries[i]->size;
 				off_t rc PG_USED_FOR_ASSERTS_ONLY;
+				uint32 offs = ZFS_INODE_OFFS(*inodes[i]);
 				Assert(size <= BLCKSZ);	
-				rc = lseek(fd, entries[i]->offs, SEEK_SET);
-				Assert(rc == entries[i]->offs);
+				rc = lseek(fd, offs, SEEK_SET);
+				Assert(rc == offs);
 				
 				if (!zfs_read_file(fd, block, size)) { 
 					elog(LOG, "Failed to read file %s: %m", file_path);
@@ -441,8 +444,9 @@ static bool zfs_gc_file(char* map_path)
 					elog(LOG, "Failed to write file %s: %m", file_bck_path);
 					goto Cleanup;
 				}
-				entries[i]->offs = newSize;
-				newSize += entries[i]->size;
+				offs = newSize;
+				newSize += size;
+				*inodes[i] = ZFS_INODE(size, offs);
 			}
 		}
 		pg_atomic_write_u32(&map->usedSize, newSize);
@@ -502,7 +506,7 @@ static bool zfs_gc_file(char* map_path)
 	  ReplaceMap:
 		/* At this moment defragmented file version is stored. We can perfrom in-place update of map.
 		 * If crash happens at this point, map can be recovered from backup file */
-		memcpy(map->entries, newMap->entries, n_pages * sizeof(FileMapEntry));
+		memcpy(map->inodes, newMap->inodes, n_pages * sizeof(inode_t));
 		pg_atomic_write_u32(&map->usedSize, newSize);
 		pg_atomic_write_u32(&map->physSize, newSize);
 		map->generation += 1; /* force all backends to reopen the file */
@@ -541,7 +545,7 @@ static bool zfs_gc_file(char* map_path)
 		pfree(file_path);
 		pfree(file_bck_path);
 		pfree(map_bck_path);
-		pfree(entries);
+		pfree(inodes);
 		pfree(newMap);
 	} else if (zfs_state->max_iterations == 1) { 
 		elog(LOG, "%d: file %.*s: physical size %d, logical size %d, used %d, compression ratio %f",
@@ -654,6 +658,7 @@ void zfs_start_background_gc()
 PG_MODULE_MAGIC;
 
 PG_FUNCTION_INFO_V1(zfs_start_gc);
+PG_FUNCTION_INFO_V1(zfs_version);
 
 Datum zfs_start_gc(PG_FUNCTION_ARGS)
 {
@@ -692,3 +697,7 @@ Datum zfs_start_gc(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32(i);
 }
 
+Datum zfs_version(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_CSTRING(psprintf("0.03-%s", zfs_algorithm()));
+}

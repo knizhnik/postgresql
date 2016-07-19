@@ -1692,7 +1692,7 @@ FileRead(File file, char *buffer, int amount)
 	if (VfdCache[file].fileFlags & PG_COMPRESSION) {
 		off_t seekPos PG_USED_FOR_ASSERTS_ONLY;
 		FileMap* map = VfdCache[file].map;
-		FileMapEntry* entry = &map->entries[VfdCache[file].seekPos / BLCKSZ];
+		inode_t inode;
 		Assert(amount == BLCKSZ);
 		Assert((VfdCache[file].seekPos & (BLCKSZ-1)) == 0);
 
@@ -1700,23 +1700,25 @@ FileRead(File file, char *buffer, int amount)
 			return -1;
 		}
 
-		amount = entry->size;
+		inode = map->inodes[VfdCache[file].seekPos / BLCKSZ];
+		amount = ZFS_INODE_SIZE(inode);
 		if (amount == 0) { 
 			zfs_unlock_file(map);
 			return 0;
 		}
 
-		seekPos = lseek(VfdCache[file].fd, entry->offs, SEEK_SET);		
+		seekPos = lseek(VfdCache[file].fd, ZFS_INODE_OFFS(inode), SEEK_SET);		
 		Assert(seekPos != (off_t) -1);
 
 		if (amount < BLCKSZ) { 
 			char compressedBuffer[BLCKSZ];
 			char* dst = compressedBuffer;
+			uint32 size = amount;
 			do { 
-				returnCode = read(VfdCache[file].fd, dst, amount);
+				returnCode = read(VfdCache[file].fd, dst, size);
 				if (returnCode > 0) { 
 					dst += returnCode;
-					amount -= returnCode;
+					size -= returnCode;
 				} else { 
 					if (errno != EINTR) { 
 						elog(LOG, "Failed to read from compressed file: %d (%s): %m",  file, VfdCache[file].fileName);
@@ -1724,12 +1726,12 @@ FileRead(File file, char *buffer, int amount)
 						return returnCode;
 					}
 				}
-			} while (amount != 0);
+			} while (size != 0);
 
-			returnCode = zfs_decompress(buffer, BLCKSZ, compressedBuffer, entry->size);
+			returnCode = zfs_decompress(buffer, BLCKSZ, compressedBuffer, amount);
 			if (returnCode != BLCKSZ) 
 			{
-				elog(LOG, "Decompress error: %d for file %s compressed size %d", returnCode, VfdCache[file].fileName, entry->size);
+				elog(LOG, "Decompress error: %d for file %s compressed size %d", returnCode, VfdCache[file].fileName, amount);
 				VfdCache[file].seekPos = FileUnknownPos;
 				returnCode = -1;
 				errno = EIO;
@@ -1788,6 +1790,7 @@ FileWrite(File file, char *buffer, int amount)
 {
 	int  returnCode;	
 	char compressedBuffer[ZFS_MAX_COMPRESSED_SIZE(BLCKSZ)];
+	inode_t inode = 0;
 
 	Assert(FileIsValid(file));
 
@@ -1830,7 +1833,6 @@ FileWrite(File file, char *buffer, int amount)
 		uint32   pos;
 		off_t    seekPos PG_USED_FOR_ASSERTS_ONLY;
 		FileMap* map = VfdCache[file].map;
-		FileMapEntry* entry = &map->entries[VfdCache[file].seekPos / BLCKSZ];
 		uint32   compressedSize;
 		Assert(amount == BLCKSZ);
 
@@ -1839,24 +1841,22 @@ FileWrite(File file, char *buffer, int amount)
 		if (!FileLock(file)) { 
 			return -1;
 		}
-
+		inode = map->inodes[VfdCache[file].seekPos / BLCKSZ];
 		if (compressedSize > 0 && compressedSize < ZFS_MIN_COMPRESSED_SIZE(BLCKSZ)) { 
 			Assert((VfdCache[file].seekPos & (BLCKSZ-1)) == 0);
 			/* Do not check that new image of compressed page fits into 
 			 * old space because we want to write all updated pages sequentially */
-			pos = zfs_alloc_page(map, entry->size, compressedSize);						
-			entry->size = compressedSize;
-			entry->offs = pos;
+			pos = zfs_alloc_page(map, ZFS_INODE_SIZE(inode), compressedSize);						
+			inode = ZFS_INODE(compressedSize, pos);
 			buffer = compressedBuffer;
 			amount = compressedSize;
 		} else { 
-			if (entry->size != BLCKSZ) { 
-				pos = zfs_alloc_page(map, entry->size, BLCKSZ);						
-				entry->offs = pos;
-				entry->size = BLCKSZ;
+			if (ZFS_INODE_SIZE(inode) != BLCKSZ) { 
+				pos = zfs_alloc_page(map, ZFS_INODE_SIZE(inode), BLCKSZ);						
+				inode = ZFS_INODE(BLCKSZ, pos);
 			} else { 
 				/* For uncompressed pages we use update  in-place. It contradicts with sequential write policy described above. */
-				pos = entry->offs;
+				pos = ZFS_INODE_OFFS(inode);
 			}
 		}
 		seekPos = lseek(VfdCache[file].fd, pos, SEEK_SET);
@@ -1875,6 +1875,7 @@ retry:
 		if (VfdCache[file].fileFlags & PG_COMPRESSION) { 
 			if (returnCode == amount)
 			{				
+				VfdCache[file].map->inodes[VfdCache[file].seekPos / BLCKSZ] = inode;
 				VfdCache[file].seekPos += BLCKSZ;
 				zfs_extend(VfdCache[file].map, VfdCache[file].seekPos);
 				returnCode = BLCKSZ;
@@ -2073,8 +2074,8 @@ FileTruncate(File file, off_t offset)
 		}
 
 		for (i = offset / BLCKSZ; i < RELSEG_SIZE; i++) {  
-			released += map->entries[i].size;
-			map->entries[i].size = 0;
+			released += ZFS_INODE_SIZE(map->inodes[i]);
+			map->inodes[i] = 0;
 		}
 		pg_atomic_write_u32(&map->virtSize, offset);
 		pg_atomic_fetch_sub_u32(&map->usedSize, released);

@@ -21,6 +21,12 @@
 #define ZFS_COMPRESSOR ZLIB_COMPRESSOR
 #endif
 
+typedef uint64 inode_t;
+
+#define ZFS_INODE_SIZE(inode) ((uint32)((inode) >> 32))
+#define ZFS_INODE_OFFS(inode) ((uint32)(inode))
+#define ZFS_INODE(size,offs)  (((inode_t)(size) << 32) | (offs))
+
 size_t zfs_compress(void* dst, size_t dst_size, void const* src, size_t src_size);
 size_t zfs_decompress(void* dst, size_t dst_size, void const* src, size_t src_size);
 char const* zfs_algorithm(void);
@@ -38,7 +44,7 @@ typedef struct
 	pg_atomic_uint32 usedSize;
 	pg_atomic_uint32 lock;
 	uint64           generation;
-	FileMapEntry     entries[RELSEG_SIZE];
+	inode_t          inodes[RELSEG_SIZE];
 } FileMap;
 
 void     zfs_lock_file(FileMap* map, char const* path);
