@@ -254,7 +254,7 @@ void cfs_unlock_file(FileMap* map)
 }
 
 /*
- * Get position for storing uodated page
+ * Get position for storing updated page
  */
 uint32 cfs_alloc_page(FileMap* map, uint32 oldSize, uint32 newSize)
 {

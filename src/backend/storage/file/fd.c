@@ -1697,7 +1697,13 @@ FileRead(File file, char *buffer, int amount)
 		Assert(amount == BLCKSZ);
 		Assert((VfdCache[file].seekPos & (BLCKSZ-1)) == 0);
 
-		if (!FileLock(file)) { 
+		if (VfdCache[file].seekPos / BLCKSZ >= RELSEG_SIZE)
+		{
+			return 0;
+		}
+
+		if (!FileLock(file)) 
+		{ 
 			return -1;
 		}
 

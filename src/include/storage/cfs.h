@@ -3,7 +3,7 @@
 
 #include "port/atomics.h"
 
-#define CFS_VERSION "0.04"
+#define CFS_VERSION "0.05"
 
 #define CFS_GC_LOCK  0x10000000
 
@@ -32,12 +32,6 @@ typedef uint64 inode_t;
 size_t cfs_compress(void* dst, size_t dst_size, void const* src, size_t src_size);
 size_t cfs_decompress(void* dst, size_t dst_size, void const* src, size_t src_size);
 char const* cfs_algorithm(void);
-
-typedef struct 
-{
-	uint32 offs;
-	uint32 size;
-} FileMapEntry;
 
 typedef struct 
 {
