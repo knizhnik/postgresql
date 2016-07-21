@@ -362,7 +362,12 @@ static bool cfs_gc_file(char* map_path)
 		inode_t** inodes = (inode_t**)palloc(RELSEG_SIZE*sizeof(inode_t*));
 		bool remove_backups = true;
 		int n_pages = virtSize / BLCKSZ;
+		TimestampTz startTime, endTime;
+		long secs;
+		int usecs;
 		int i;
+		
+		startTime = GetCurrentTimestamp();
 
 		memcpy(file_path, map_path, suf);
 		file_path[suf] = '\0';
@@ -542,15 +547,19 @@ static bool cfs_gc_file(char* map_path)
 			succeed = false;
 		}
 		
-		elog(LOG, "%d: defragment file %s: old size %d, new size %d, logical size %d, used %d, compression ratio %f",
-			 MyProcPid, file_path, physSize, newSize, virtSize, usedSize, (double)virtSize/newSize);
+		endTime = GetCurrentTimestamp();
+		TimestampDifference(startTime, endTime, &secs, &usecs);
+
+		elog(LOG, "%d: defragment file %s: old size %d, new size %d, logical size %d, used %d, compression ratio %f, time %ld usec",
+			 MyProcPid, file_path, physSize, newSize, virtSize, usedSize, (double)virtSize/newSize,
+			 secs*USECS_PER_SEC + usecs);
 
 		pfree(file_path);
 		pfree(file_bck_path);
 		pfree(map_bck_path);
 		pfree(inodes);
 		pfree(newMap);
-
+		
 		if (cfs_gc_delay != 0) { 
 			int rc = WaitLatch(MyLatch,
 							   WL_TIMEOUT | WL_POSTMASTER_DEATH,
@@ -638,6 +647,8 @@ static void cfs_bgworker_main(Datum arg)
 
     /* We're now ready to receive signals */
     BackgroundWorkerUnblockSignals();
+
+	elog(INFO, "Start CFS garbage collector %d", MyProcPid);
 
 	while (cfs_scan_tablespace(worker_id) && !cfs_stop && --cfs_state->max_iterations >= 0) { 
 		int rc = WaitLatch(MyLatch,
