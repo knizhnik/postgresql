@@ -47,7 +47,8 @@
 
 int cfs_gc_workers;
 int cfs_gc_threshold;
-int cfs_gc_timeout;
+int cfs_gc_period;
+int cfs_gc_delay;
 
 
 typedef struct
@@ -549,6 +550,15 @@ static bool cfs_gc_file(char* map_path)
 		pfree(map_bck_path);
 		pfree(inodes);
 		pfree(newMap);
+
+		if (cfs_gc_delay != 0) { 
+			int rc = WaitLatch(MyLatch,
+							   WL_TIMEOUT | WL_POSTMASTER_DEATH,
+							   cfs_gc_delay /* ms */ );
+			if (rc & WL_POSTMASTER_DEATH) {
+				exit(1);
+			}
+		}
 	} else if (cfs_state->max_iterations == 1) { 
 		elog(LOG, "%d: file %.*s: physical size %d, logical size %d, used %d, compression ratio %f",
 			 MyProcPid, suf, map_path, physSize, virtSize, usedSize, (double)virtSize/physSize);
@@ -630,7 +640,12 @@ static void cfs_bgworker_main(Datum arg)
     BackgroundWorkerUnblockSignals();
 
 	while (cfs_scan_tablespace(worker_id) && !cfs_stop && --cfs_state->max_iterations >= 0) { 
-		pg_usleep(cfs_gc_timeout*USECS_PER_SEC);
+		int rc = WaitLatch(MyLatch,
+						   WL_TIMEOUT | WL_POSTMASTER_DEATH,
+						   cfs_gc_period /* ms */ );
+		if (rc & WL_POSTMASTER_DEATH) {
+			exit(1);
+		}
 	}
 }
 

@@ -520,7 +520,7 @@ mdunlinkfork(RelFileNodeBackend rnode, ForkNumber forkNum, bool isRedo)
 	 */
 	if (ret >= 0)
 	{
-		char	   *segpath = (char *) palloc(strlen(path) + 12);
+		char	   *segpath = (char *) palloc(strlen(path) + 16);
 		BlockNumber segno;
 
 		/*
@@ -539,16 +539,19 @@ mdunlinkfork(RelFileNodeBackend rnode, ForkNumber forkNum, bool isRedo)
 					   errmsg("could not remove file \"%s\": %m", segpath)));
 				break;
 			}
+			if (forkNum == MAIN_FORKNUM) { 	
+				sprintf(segpath, "%s.%u.map", path, segno);
+				unlink(segpath);
+			}
+		}
+		/* 
+		 * Delete map file
+		 */
+		if (forkNum == MAIN_FORKNUM) { 
+			sprintf(segpath, "%s.map", path);
+			unlink(segpath);
 		}
 		pfree(segpath);
-	}
-	/* 
-	 * Delete map file
-	 */
-	if (forkNum == MAIN_FORKNUM) { 
-		char* mapFileName = psprintf("%s.map",  path);
-		unlink(mapFileName);
-		pfree(mapFileName);
 	}
 	pfree(path);
 }

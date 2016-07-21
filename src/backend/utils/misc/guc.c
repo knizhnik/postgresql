@@ -2832,17 +2832,28 @@ static struct config_int ConfigureNamesInt[] =
 
 
 	{
-		{"cfs_gc_timeout", PGC_POSTMASTER, UNGROUPED,
-		 gettext_noop("Delay in seconds between CFS garbage collection iterations"),
+		{"cfs_gc_period", PGC_POSTMASTER, UNGROUPED,
+		 gettext_noop("Interval in milliseconds between CFS garbage collection iterations"),
 		 NULL,
-		 GUC_UNIT_S
+		 GUC_UNIT_MS
         },
-		&cfs_gc_timeout,
-        5, 0, INT_MAX,
+		&cfs_gc_period,
+        5000, 0, INT_MAX,
         NULL, NULL, NULL
     },
 
-/* End-of-list marker */
+	{
+		{"cfs_gc_delay", PGC_POSTMASTER, UNGROUPED,
+		 gettext_noop("Delay in milliseconds between files defragmentation"),
+		 NULL,
+		 GUC_UNIT_MS
+        },
+		&cfs_gc_delay,
+        0, 0, 10000,
+        NULL, NULL, NULL
+    },
+
+    /* End-of-list marker */
 	{
 		{NULL, 0, 0, NULL, NULL}, NULL, 0, 0, 0, NULL, NULL, NULL
 	}

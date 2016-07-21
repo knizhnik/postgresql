@@ -53,8 +53,9 @@ FileMap* cfs_mmap(int md);
 int      cfs_munmap(FileMap* map);
 void     cfs_initialize(void);
 
+extern int cfs_gc_delay;
+extern int cfs_gc_period;
 extern int cfs_gc_workers;
-extern int cfs_gc_timeout;
 extern int cfs_gc_threshold;
 
 #endif
