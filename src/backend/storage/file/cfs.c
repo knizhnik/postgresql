@@ -187,7 +187,6 @@ static void cfs_rc4_encrypt_block(void* block, uint32 offs, uint32 block_size)
 	uint32 skip = (offs / BLCKSZ + block_size) % CFS_CIPHER_KEY_SIZE;
 
 	memcpy(state, cfs_state->rc4_init_state, CFS_CIPHER_KEY_SIZE);
-	
     for (i = 0; i < skip; i++) {
         x = (x + 1) % CFS_CIPHER_KEY_SIZE;
         y = (y + state[x]) % CFS_CIPHER_KEY_SIZE;
@@ -196,7 +195,7 @@ static void cfs_rc4_encrypt_block(void* block, uint32 offs, uint32 block_size)
         state[y] = temp;
     }
     for (i = 0; i < block_size; i++) {
-        x = (x + 1) & CFS_CIPHER_KEY_SIZE;
+        x = (x + 1) % CFS_CIPHER_KEY_SIZE;
         y = (y + state[x]) % CFS_CIPHER_KEY_SIZE;
         temp = state[x];
         state[x] = state[y];
@@ -215,7 +214,7 @@ static void cfs_rc4_init(void)
     int key_length;
     int x = 0, y = 0;
 	char* cipher_key;
-	uint8 rc4_init_state[CFS_CIPHER_KEY_SIZE];
+	uint8* rc4_init_state = cfs_state->rc4_init_state;
 
 	cipher_key = getenv("PG_CIPHER_KEY");
 	if (cipher_key == NULL) { 
