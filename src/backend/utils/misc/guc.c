@@ -1654,6 +1654,16 @@ static struct config_bool ConfigureNamesBool[] =
 		NULL, NULL, NULL
 	},
 
+	{
+		{"cfs_encryption", PGC_POSTMASTER, UNGROUPED,
+		 gettext_noop("Encrypt CFS pages"),
+		 NULL,
+        },
+		&cfs_encryption,
+        false,
+        NULL, NULL, NULL
+    },	
+
 	/* End-of-list marker */
 	{
 		{NULL, 0, 0, NULL, NULL}, NULL, false, NULL, NULL, NULL

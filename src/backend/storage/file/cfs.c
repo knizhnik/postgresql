@@ -49,13 +49,14 @@ int cfs_gc_workers;
 int cfs_gc_threshold;
 int cfs_gc_period;
 int cfs_gc_delay;
-
+bool cfs_encryption;
 
 typedef struct
 {
 	pg_atomic_flag gc_started;
 	int            n_workers;
 	int            max_iterations;
+	uint8          rc4_init_state[CFS_CIPHER_KEY_SIZE];
 } CfsState;
 
 
@@ -175,13 +176,97 @@ char const* cfs_algorithm()
 #endif
 
 
+static void cfs_rc4_encrypt_block(void* block, uint32 offs, uint32 block_size)
+{
+	uint32 i;
+    uint8 temp;
+	uint8* dst = (uint8*)block;
+	int   next_state;
+	uint8 state[CFS_CIPHER_KEY_SIZE];
+    int x = 0, y = 0;
+	uint32 skip = (offs / BLCKSZ + block_size) % CFS_CIPHER_KEY_SIZE;
 
+	memcpy(state, cfs_state->rc4_init_state, CFS_CIPHER_KEY_SIZE);
+	
+    for (i = 0; i < skip; i++) {
+        x = (x + 1) % CFS_CIPHER_KEY_SIZE;
+        y = (y + state[x]) % CFS_CIPHER_KEY_SIZE;
+        temp = state[x];
+        state[x] = state[y];
+        state[y] = temp;
+    }
+    for (i = 0; i < block_size; i++) {
+        x = (x + 1) & CFS_CIPHER_KEY_SIZE;
+        y = (y + state[x]) % CFS_CIPHER_KEY_SIZE;
+        temp = state[x];
+        state[x] = state[y];
+        state[y] = temp;
+        next_state = (state[x] + state[y]) % CFS_CIPHER_KEY_SIZE;
+        dst[i] ^= state[next_state];
+    }
+}
+
+static void cfs_rc4_init(void)
+{
+    int index1 = 0;
+    int index2 = 0;
+    int i;
+    uint8 temp;
+    int key_length;
+    int x = 0, y = 0;
+	char* cipher_key;
+	uint8 rc4_init_state[CFS_CIPHER_KEY_SIZE];
+
+	cipher_key = getenv("PG_CIPHER_KEY");
+	if (cipher_key == NULL) { 
+		elog(ERROR, "PG_CIPHER_KEY environment variable is not set");
+	} 
+    key_length = strlen(cipher_key);
+	for (i = 0; i < CFS_CIPHER_KEY_SIZE; ++i) {
+        rc4_init_state[i] = (uint8)i;
+    }
+    for (i = 0; i < CFS_CIPHER_KEY_SIZE; ++i) {
+        index2 = (cipher_key[index1] + rc4_init_state[i] + index2) % CFS_CIPHER_KEY_SIZE;
+        temp = rc4_init_state[i];
+        rc4_init_state[i] = rc4_init_state[index2];
+        rc4_init_state[index2] = temp;
+        index1 = (index1 + 1) % key_length;
+    }
+    for (i = 0; i < CFS_RC4_DROP_N; i++) {
+        x = (x + 1) % CFS_CIPHER_KEY_SIZE;
+        y = (y + rc4_init_state[x]) % CFS_CIPHER_KEY_SIZE;
+        temp = rc4_init_state[x];
+        rc4_init_state[x] = rc4_init_state[y];
+        rc4_init_state[y] = temp;
+    }
+}
+
+void cfs_encrypt(void* block, uint32 offs, uint32 size)
+{
+	if (cfs_encryption) 
+	{
+		cfs_rc4_encrypt_block(block, offs, size);
+	}
+}
+
+void cfs_decrypt(void* block, uint32 offs, uint32 size)
+{
+	if (cfs_encryption) 
+	{
+		cfs_rc4_encrypt_block(block, offs, size);
+	}
+}
+
+	
 void cfs_initialize()
 {
 	cfs_state = (CfsState*)ShmemAlloc(sizeof(CfsState));
 	pg_atomic_init_flag(&cfs_state->gc_started);
-	elog(LOG, "Start CFS version %s compression algorithm %s", 
-		 CFS_VERSION, cfs_algorithm());
+	if (cfs_encryption) { 
+		cfs_rc4_init();
+	}
+	elog(LOG, "Start CFS version %s compression algorithm %s encryption %s", 
+		 CFS_VERSION, cfs_algorithm(), cfs_encryption ? "enabled" : "disabled");
 }
 
 int cfs_msync(FileMap* map)

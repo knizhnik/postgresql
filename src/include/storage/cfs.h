@@ -23,6 +23,9 @@
 #define CFS_COMPRESSOR ZLIB_COMPRESSOR
 #endif
 
+#define CFS_RC4_DROP_N 3072 
+#define CFS_CIPHER_KEY_SIZE 256
+
 typedef uint64 inode_t;
 
 #define CFS_INODE_SIZE(inode) ((uint32)((inode) >> 32))
@@ -53,11 +56,14 @@ FileMap* cfs_mmap(int md);
 int      cfs_munmap(FileMap* map);
 void     cfs_initialize(void);
 
+void     cfs_encrypt(void* block, uint32 offs, uint32 size);
+void     cfs_decrypt(void* block, uint32 offs, uint32 size);
+
 extern int cfs_gc_delay;
 extern int cfs_gc_period;
 extern int cfs_gc_workers;
 extern int cfs_gc_threshold;
-
+extern bool cfs_encryption;
 #endif
 
 
