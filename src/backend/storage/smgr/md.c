@@ -27,6 +27,7 @@
 
 #include "miscadmin.h"
 #include "access/xlog.h"
+#include "access/transam.h"
 #include "catalog/catalog.h"
 #include "catalog/pg_tablespace.h"
 #include "portability/instr_time.h"
@@ -216,9 +217,11 @@ static bool md_use_compression(SMgrRelation reln, ForkNumber forknum)
 	bool found;
 	TablespaceStatus* ts;
 
+	/* Do not compress system (catalog) relations created during bootstrap */
 	if (forknum != MAIN_FORKNUM
 		|| reln->smgr_rnode.node.spcNode == DEFAULTTABLESPACE_OID 
-		|| reln->smgr_rnode.node.spcNode == GLOBALTABLESPACE_OID)
+		|| reln->smgr_rnode.node.spcNode == GLOBALTABLESPACE_OID
+		|| reln->smgr_rnode.node.relNode < FirstNormalObjectId)
 	{
 		return false;
 	}
