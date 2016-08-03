@@ -28,7 +28,9 @@
 #include <limits.h>
 #include <unistd.h>
 #include <fcntl.h>
+#ifndef WIN32
 #include <sys/mman.h>
+#endif
 
 #include "miscadmin.h"
 #include "access/xact.h"
@@ -270,17 +272,40 @@ void cfs_initialize()
 
 int cfs_msync(FileMap* map)
 {
+#ifdef WIN32
+	return FlushViewOfFile(map, sizeof(FileMap)) ? 0 : -1;
+#else
 	return msync(map, sizeof(FileMap), MS_SYNC);
+#endif
 }
 
 FileMap* cfs_mmap(int md)
 {
+#ifdef WIN32
+    HANDLE mh = CreateFileMapping(md, FASTDB_SECURITY_ATTRIBUTES, PAGE_READWRITE, 
+								  0, (DWORD)sizeof(FileMap), NULL);
+	void* map;
+    if (mh == NULL) { 
+        return (FileMap*)MAP_FAILED;
+    }
+    map = MapViewOfFile(mh, FILE_MAP_ALL_ACCESS, 0, 0, 0); 
+	CloseHandle(mh);
+    if (map == NULL) { 
+        return (FileMap*)MAP_FAILED;
+    }
+	return (FileMap*)map;
+#else
 	return (FileMap*)mmap(NULL, sizeof(FileMap), PROT_WRITE | PROT_READ, MAP_SHARED, md, 0);
+#endif
 }
 
 int cfs_munmap(FileMap* map)
 {
+#ifdef WIN32
+	return UnmapViewOfFile(map) ? 0 : -1;
+#else
 	return munmap(map, sizeof(FileMap));
+#endif
 }
 
 void cfs_lock_file(FileMap* map, char const* file_path)
