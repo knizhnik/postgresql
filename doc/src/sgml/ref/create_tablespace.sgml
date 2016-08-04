@@ -105,7 +105,7 @@ CREATE TABLESPACE <replaceable class="parameter">tablespace_name</replaceable>
        <para>
         A tablespace parameter to be set or reset.  Currently, the only
         available parameters are <varname>seq_page_cost</>,
-        <varname>random_page_cost</>, <varname>effective_io_concurrency</> and <varname>compression>/>.
+        <varname>random_page_cost</>, <varname>effective_io_concurrency</> and <varname>compression</>.
         Setting cost value for a particular tablespace will override the
         planner's usual estimate of the cost of reading pages from tables in
         that tablespace, as established by the configuration parameters of the

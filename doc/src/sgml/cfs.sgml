@@ -1,14 +1,14 @@
 <!-- doc/src/sgml/cfs.sgml -->
 
 <chapter id="cfs">
-  <title>Compressed file system</title>
-  
+ <title>Compressed file system</title>
+
  <para>
   This chapter explains page level compression and encryption in
   <productname>PostgreSQL</> database system.
  </para>
 
- <sect1 id="motivation">
+ <sect1 id="cfs-overview">
   <title>Why database compression/encryption may be useful</title>
     
   <para>
@@ -89,7 +89,7 @@
 
  </sect1>
     
- <sect1 id="implementation">
+ <sect1 id="cfs-implementation">
   <title>How compression/encryption are integrated in Postgres</title>
     
   <para>
@@ -162,7 +162,7 @@
 
  </sect1>
     
- <sect1 id="usage">
+ <sect1 id="cfs-usage">
   <title>Using of compression/encryption</title>
     
   <para>
@@ -193,7 +193,7 @@
 
     <variablelist>
 
-     <varlistentry id="cfs_encryption" xreflabel="cfs_encryption">
+     <varlistentry id="cfs-encryption" xreflabel="cfs_encryption">
       <term><varname>cfs_encryption</varname> (<type>boolean</type>)
       <indexterm>
        <primary><varname>cfs_encryption</> configuration parameter</primary>
@@ -206,7 +206,7 @@
       </listitem>
      </varlistentry>
 
-     <varlistentry id="cfs_gc_workers" xreflabel="cfs_gc_workers">
+     <varlistentry id="cfs-gc-workers" xreflabel="cfs_gc_workers">
       <term><varname>cfs_gc_workers</varname> (<type>integer</type>)
       <indexterm>
        <primary><varname>cfs_gc_workers</> configuration parameter</primary>
@@ -219,7 +219,7 @@
       </listitem>
      </varlistentry>
 
-     <varlistentry id="cfs_gc_threshold" xreflabel="cfs_gc_threshold">
+     <varlistentry id="cfs-gc-threshold" xreflabel="cfs_gc_threshold">
       <term><varname>cfs_gc_threshold</varname> (<type>integer</type>)
       <indexterm>
        <primary><varname>cfs_gc_threshold</> configuration parameter</primary>
@@ -232,7 +232,7 @@
       </listitem>
      </varlistentry>
 
-     <varlistentry id="cfs_gc_period" xreflabel="cfs_gc_period">
+     <varlistentry id="cfs-gc-period" xreflabel="cfs_gc_period">
       <term><varname>cfs_gc_period</varname> (<type>integer</type>)
       <indexterm>
        <primary><varname>cfs_gc_period</> configuration parameter</primary>
@@ -245,7 +245,7 @@
       </listitem>
      </varlistentry>
 
-     <varlistentry id="cfs_gc_delay" xreflabel="cfs_gc_delay">
+     <varlistentry id="cfs-gc-delay" xreflabel="cfs_gc_delay">
       <term><varname>cfs_gc_delay</varname> (<type>integer</type>)
       <indexterm>
        <primary><varname>cfs_gc_delay</> configuration parameter</primary>
