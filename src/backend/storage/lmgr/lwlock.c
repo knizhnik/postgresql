@@ -95,6 +95,7 @@
 /* We use the ShmemLock spinlock to protect LWLockCounter */
 extern slock_t *ShmemLock;
 
+#define LW_FLAG_HAS_WAITING_WRITERS ((uint32) 1 << 31)
 #define LW_FLAG_HAS_WAITERS			((uint32) 1 << 30)
 #define LW_FLAG_RELEASE_OK			((uint32) 1 << 29)
 #define LW_FLAG_LOCKED				((uint32) 1 << 28)
@@ -112,6 +113,8 @@ extern slock_t *ShmemLock;
  */
 static LWLockTranche **LWLockTrancheArray = NULL;
 static int	LWLockTranchesAllocated = 0;
+
+bool pg_fair_lwlocks;
 
 #define T_NAME(lock) \
 	(LWLockTrancheArray[(lock)->tranche]->name)
@@ -717,6 +720,7 @@ LWLockInitialize(LWLock *lock, int tranche_id)
 	pg_atomic_init_u32(&lock->nwaiters, 0);
 #endif
 	lock->tranche = tranche_id;
+	lock->nWaitingWriters = 0;
 	dlist_init(&lock->waiters);
 }
 
@@ -808,7 +812,7 @@ LWLockAttemptLock(LWLock *lock, LWLockMode mode)
 		}
 		else
 		{
-			lock_free = (old_state & LW_VAL_EXCLUSIVE) == 0;
+			lock_free = (old_state & (LW_VAL_EXCLUSIVE|LW_FLAG_HAS_WAITING_WRITERS)) == 0;
 			if (lock_free)
 				desired_state += LW_VAL_SHARED;
 		}
@@ -935,7 +939,13 @@ LWLockWakeup(LWLock *lock)
 		PGPROC	   *waiter = dlist_container(PGPROC, lwWaitLink, iter.cur);
 
 		if (wokeup_somebody && waiter->lwWaitMode == LW_EXCLUSIVE)
-			continue;
+		{
+			if (pg_fair_lwlocks) {
+				break;
+			} else {
+				continue;
+			}
+		}
 
 		dlist_delete(&waiter->lwWaitLink);
 		dlist_push_tail(&wakeup, &waiter->lwWaitLink);
@@ -959,8 +969,13 @@ LWLockWakeup(LWLock *lock)
 		 * Once we've woken up an exclusive lock, there's no point in waking
 		 * up anybody else.
 		 */
-		if (waiter->lwWaitMode == LW_EXCLUSIVE)
+		if (waiter->lwWaitMode == LW_EXCLUSIVE) {
+			if (pg_fair_lwlocks) { 
+				Assert(lock->nWaitingWriters > 0);
+				lock->nWaitingWriters -= 1;
+			}
 			break;
+		}
 	}
 
 	Assert(dlist_is_empty(&wakeup) || pg_atomic_read_u32(&lock->state) & LW_FLAG_HAS_WAITERS);
@@ -984,6 +999,9 @@ LWLockWakeup(LWLock *lock)
 
 			if (dlist_is_empty(&wakeup))
 				desired_state &= ~LW_FLAG_HAS_WAITERS;
+
+			if (lock->nWaitingWriters == 0) 
+				desired_state &= ~LW_FLAG_HAS_WAITING_WRITERS;
 
 			desired_state &= ~LW_FLAG_LOCKED;	/* release lock */
 
@@ -1025,6 +1043,7 @@ LWLockWakeup(LWLock *lock)
 static void
 LWLockQueueSelf(LWLock *lock, LWLockMode mode)
 {
+	int newstate;
 	/*
 	 * If we don't have a PGPROC structure, there's no way to wait. This
 	 * should never occur, since MyProc should only be null during shared
@@ -1039,7 +1058,13 @@ LWLockQueueSelf(LWLock *lock, LWLockMode mode)
 	LWLockWaitListLock(lock);
 
 	/* setting the flag is protected by the spinlock */
-	pg_atomic_fetch_or_u32(&lock->state, LW_FLAG_HAS_WAITERS);
+	newstate = LW_FLAG_HAS_WAITERS;
+	if (pg_fair_lwlocks && mode == LW_EXCLUSIVE)
+	{
+		newstate |= LW_FLAG_HAS_WAITING_WRITERS;
+		lock->nWaitingWriters += 1;
+	}
+	pg_atomic_fetch_or_u32(&lock->state, newstate);
 
 	MyProc->lwWaiting = true;
 	MyProc->lwWaitMode = mode;
@@ -1067,7 +1092,7 @@ LWLockQueueSelf(LWLock *lock, LWLockMode mode)
  * do so.
  */
 static void
-LWLockDequeueSelf(LWLock *lock)
+LWLockDequeueSelf(LWLock *lock, LWLockMode mode)
 {
 	bool		found = false;
 	dlist_mutable_iter iter;
@@ -1094,6 +1119,8 @@ LWLockDequeueSelf(LWLock *lock)
 		{
 			found = true;
 			dlist_delete(&proc->lwWaitLink);
+			if (pg_fair_lwlocks && mode == LW_EXCLUSIVE && --lock->nWaitingWriters == 0)
+				pg_atomic_fetch_and_u32(&lock->state, ~LW_FLAG_HAS_WAITING_WRITERS);
 			break;
 		}
 	}
@@ -1259,7 +1286,7 @@ LWLockAcquire(LWLock *lock, LWLockMode mode)
 		{
 			LOG_LWDEBUG("LWLockAcquire", lock, "acquired, undoing queue");
 
-			LWLockDequeueSelf(lock);
+			LWLockDequeueSelf(lock, mode);
 			break;
 		}
 
@@ -1476,7 +1503,7 @@ LWLockAcquireOrWait(LWLock *lock, LWLockMode mode)
 			 * not necessarily wake up people we've prevented from acquiring
 			 * the lock.
 			 */
-			LWLockDequeueSelf(lock);
+			LWLockDequeueSelf(lock, mode);
 		}
 	}
 
@@ -1637,7 +1664,7 @@ LWLockWaitForVar(LWLock *lock, uint64 *valptr, uint64 oldval, uint64 *newval)
 		{
 			LOG_LWDEBUG("LWLockWaitForVar", lock, "free, undoing queue");
 
-			LWLockDequeueSelf(lock);
+			LWLockDequeueSelf(lock, LW_WAIT_UNTIL_FREE);
 			break;
 		}
 
@@ -1815,9 +1842,8 @@ LWLockRelease(LWLock *lock)
 	 * We're still waiting for backends to get scheduled, don't wake them up
 	 * again.
 	 */
-	if ((oldstate & (LW_FLAG_HAS_WAITERS | LW_FLAG_RELEASE_OK)) ==
-		(LW_FLAG_HAS_WAITERS | LW_FLAG_RELEASE_OK) &&
-		(oldstate & LW_LOCK_MASK) == 0)
+	if ((oldstate & (LW_FLAG_HAS_WAITERS | LW_FLAG_RELEASE_OK | LW_LOCK_MASK)) ==
+		(LW_FLAG_HAS_WAITERS | LW_FLAG_RELEASE_OK))
 		check_waiters = true;
 	else
 		check_waiters = false;

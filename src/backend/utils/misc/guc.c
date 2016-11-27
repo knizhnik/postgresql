@@ -1655,6 +1655,16 @@ static struct config_bool ConfigureNamesBool[] =
 	},
 
 	{
+		{"pg_fair_lwlocks", PGC_POSTMASTER, UNGROUPED,
+		 gettext_noop("Toggle between FAIR and readers-preferring LWLOCKS"),
+		 NULL,
+        },
+		&pg_fair_lwlocks,
+        false,
+        NULL, NULL, NULL
+    },	
+
+	{
 		{"cfs_encryption", PGC_POSTMASTER, UNGROUPED,
 		 gettext_noop("Encrypt CFS pages"),
 		 NULL,

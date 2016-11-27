@@ -58,6 +58,7 @@ typedef struct LWLockTranche
 typedef struct LWLock
 {
 	uint16		tranche;		/* tranche ID */
+	uint16      nWaitingWriters;/* number of pended exclusive lock requests in waiters list */
 	pg_atomic_uint32 state;		/* state of exclusive/nonexclusive lockers */
 	dlist_head	waiters;		/* list of waiting PGPROCs */
 #ifdef LOCK_DEBUG
@@ -114,6 +115,8 @@ typedef union LWLockMinimallyPadded
 
 extern PGDLLIMPORT LWLockPadded *MainLWLockArray;
 extern char *MainLWLockNames[];
+
+extern bool pg_fair_lwlocks;
 
 /* struct for storing named tranche information */
 typedef struct NamedLWLockTranche
