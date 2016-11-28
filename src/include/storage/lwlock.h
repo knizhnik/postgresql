@@ -57,7 +57,8 @@ typedef struct LWLockTranche
  */
 typedef struct LWLock
 {
-	uint16		tranche;		/* tranche ID */
+	uint16		tranche : 15;	/* tranche ID */
+	uint16      fair : 1;       /* Fair lwlock */
 	uint16      nWaitingWriters;/* number of pended exclusive lock requests in waiters list */
 	pg_atomic_uint32 state;		/* state of exclusive/nonexclusive lockers */
 	dlist_head	waiters;		/* list of waiting PGPROCs */
@@ -166,6 +167,12 @@ typedef enum LWLockMode
 								 * to be used as LWLockAcquire argument */
 } LWLockMode;
 
+typedef enum LWLockKind
+{
+	LWKIND_FAIR,
+	LWKIND_READER_PREFERABLE,
+	LWKIND_WRITER_PREFERABLE
+} LWLockKind;
 
 #ifdef LOCK_DEBUG
 extern bool Trace_lwlocks;
@@ -213,6 +220,7 @@ extern LWLockPadded *GetNamedLWLockTranche(const char *tranche_name);
 extern int	LWLockNewTrancheId(void);
 extern void LWLockRegisterTranche(int tranche_id, LWLockTranche *tranche);
 extern void LWLockInitialize(LWLock *lock, int tranche_id);
+extern void LWLockInitializeEx(LWLock *lock, int tranche_id, LWLockKind kind);
 
 /*
  * We reserve a few predefined tranche IDs.  A call to LWLockNewTrancheId

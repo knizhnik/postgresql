@@ -4715,7 +4715,7 @@ XLOGShmemInit(void)
 	LWLockRegisterTranche(LWTRANCHE_WAL_INSERT, &XLogCtl->Insert.WALInsertLockTranche);
 	for (i = 0; i < NUM_XLOGINSERT_LOCKS; i++)
 	{
-		LWLockInitialize(&WALInsertLocks[i].l.lock, LWTRANCHE_WAL_INSERT);
+		LWLockInitializeEx(&WALInsertLocks[i].l.lock, LWTRANCHE_WAL_INSERT, LWKIND_READER_PREFERABLE);
 		WALInsertLocks[i].l.insertingAt = InvalidXLogRecPtr;
 	}
 
