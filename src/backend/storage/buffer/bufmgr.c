@@ -111,6 +111,8 @@ double		bgwriter_lru_multiplier = 2.0;
 bool		track_io_timing = false;
 int			effective_io_concurrency = 0;
 
+int         pg_delayed_unpin;
+
 /*
  * GUC variables about triggering kernel writeback for buffers written; OS
  * dependent defaults are set via the GUC mechanism.
@@ -236,6 +238,10 @@ ReservePrivateRefCountEntry(void)
 							  &found);
 		Assert(!found);
 		hashent->refcount = ReservedRefCountEntry->refcount;
+		if (pg_delayed_unpin) {
+			Assert(hashent->refcount != 0);
+			hashent->refcount -= 1;
+		}
 
 		/* clear the now free array slot */
 		ReservedRefCountEntry->buffer = InvalidBuffer;
@@ -335,6 +341,9 @@ GetPrivateRefCountEntry(Buffer buffer, bool do_move)
 		/* and fill it */
 		free->buffer = buffer;
 		free->refcount = res->refcount;
+		if (pg_delayed_unpin) {
+			free->refcount += 1;
+		}
 
 		/* delete from hashtable */
 		hash_search(PrivateRefCountHash,

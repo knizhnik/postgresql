@@ -76,6 +76,8 @@ extern int	checkpoint_flush_after;
 extern int	backend_flush_after;
 extern int	bgwriter_flush_after;
 
+extern bool pg_delayed_unpin;
+
 /* in buf_init.c */
 extern PGDLLIMPORT char *BufferBlocks;
 

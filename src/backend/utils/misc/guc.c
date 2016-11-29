@@ -1665,6 +1665,16 @@ static struct config_bool ConfigureNamesBool[] =
     },	
 
 	{
+		{"pg_delayed_unpin", PGC_POSTMASTER, UNGROUPED,
+		 gettext_noop("Delay unpin of most frequently access buffer pages in backend"),
+		 NULL,
+        },
+		&pg_delayed_unpin,
+        false,
+        NULL, NULL, NULL
+    },	
+
+	{
 		{"cfs_encryption", PGC_POSTMASTER, UNGROUPED,
 		 gettext_noop("Encrypt CFS pages"),
 		 NULL,
